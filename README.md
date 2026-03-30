@@ -108,3 +108,16 @@ python3 analysis.py
 ### Configuration of project
 Configuration of the project needs to be defined in `config`. Please use the `default.config` file for the required structure of the file. If no custom config file is provided, `default.config` is used. The config file has the following parameters:
 
+- **`mapping`**: CSV file containing mapping data used to select videos and time segments.
+- **`videos`**: List of directories containing local video files.
+- **`base_url`**: Base URL of the remote file server used to download videos.
+- **`RUNS_DIR`**: Directory where output JSONL files and intermediate run files are stored.
+- **`MAPANYTHING_FPS`**: Frame sampling rate used for frame extraction and timestamp generation during inference.
+- **`ENABLE_VIZ`**: Enables visualisation related options if supported by the pipeline.
+- **`DELETE_DOWNLOADED_VIDEO`**: Deletes downloaded video files after processing is complete.
+- **`DELETE_FRAMES_AFTER_PROCESSING`**: Deletes extracted frames after MapAnything inference has finished.
+- **`KEEP_GOING`**: Continues processing the remaining videos even if one video fails.
+- **`OVERWRITE_FRAMES`**: Recreates extracted frames even if they already exist.
+- **`TARGET_LOCALITY`**: Restricts processing to a specific locality from the mapping CSV. Use `null` to process all localities.
+- **`TARGET_ROW_ID`**: Restricts processing to a specific row ID from the mapping CSV. Use `null` to process all rows.
+- **`MAX_VIDEOS_TO_PROCESS`**: Limits the number of videos to process. Use `null` for no limit.
