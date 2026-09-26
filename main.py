@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import ast
 import csv
+import importlib.util
 import logging
 import re
 import shutil
 import subprocess
-import sys
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any, Optional, Set
@@ -19,12 +19,18 @@ import requests
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger("mapanything_downloader")
+
 
 def _cfg(key: str, default: Any = None) -> Any:
     """Read an optional config value and fall back to a default if missing."""
     try:
         value = common.get_configs(key)
-    except Exception:
+    except KeyError:
         return default
     return default if value is None else value
 
@@ -39,13 +45,14 @@ cfg = SimpleNamespace(
     debug=_cfg("debug", True),  # enable verbose downloader logging
     aliases=_cfg("aliases", ["tue1", "tue2", "tue3", "tue4"]),  # server aliases to try
     download_dir=_cfg("download_dir", "downloads"),  # temporary folder for downloaded videos
-    runs_dir=_cfg("runs_dir", "runs"),  # folder where JSONL outputs and frame folders are written
+    runs_dir=_cfg("RUNS_DIR", "runs"),  # folder where JSONL outputs and frame folders are written
     mapanything_fps=_cfg("MAPANYTHING_FPS", 0.01),  # frame sampling FPS used for extraction and timestamps
     enable_viz=_cfg("ENABLE_VIZ", False),  # reserved flag, currently unused in this script
     delete_downloaded_video=_cfg("DELETE_DOWNLOADED_VIDEO", True),  # delete downloaded video after processing
-    delete_frames_after_processing=_cfg("DELETE_FRAMES_AFTER_PROCESSING", True),  # delete extracted frames after inference # noqa: E501
+    delete_frames_after_processing=_cfg("DELETE_FRAMES_AFTER_PROCESSING", True),  # delete frames after inference
     keep_going=_cfg("KEEP_GOING", True),  # continue with the next video if one fails
     overwrite_frames=_cfg("OVERWRITE_FRAMES", True),  # re extract frames even if frame files already exist
+    skip_existing_outputs=_cfg("SKIP_EXISTING_OUTPUTS", True),  # skip segments whose JSONL output already exists
     target_locality=_cfg("TARGET_LOCALITY", None),  # optional CSV locality filter
     target_row_id=_cfg("TARGET_ROW_ID", None),  # optional CSV row id filter
     max_videos_to_process=_cfg("MAX_VIDEOS_TO_PROCESS", None),  # optional cap on queued source videos
@@ -55,13 +62,6 @@ secrets = SimpleNamespace(
     ftp_username=common.get_secrets("ftp_username"),
     ftp_password=common.get_secrets("ftp_password"),
 )
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-logger = logging.getLogger("mapanything_downloader")
 
 
 def run_command(cmd: list[str], cwd: Path | None = None) -> None:
@@ -78,7 +78,7 @@ def resolve_path(value: str | Path, repo_root: Path) -> Path:
 
 def sanitise_name(value: str) -> str:
     value = value.strip()
-    value = re.sub(r"[^\w\s.]", "", value)
+    value = re.sub(r"[^\w\s.-]", "", value)
     value = re.sub(r"\s+", "_", value)
     return value or "unknown"
 
@@ -93,20 +93,8 @@ def format_time_label(value: float | int | str) -> str:
         return sanitise_name(str(value))
 
 
-def make_unique_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-
-    stem = path.stem
-    suffix = path.suffix
-    parent = path.parent
-
-    i = 2
-    while True:
-        candidate = parent / f"{stem}_{i}{suffix}"
-        if not candidate.exists():
-            return candidate
-        i += 1
+def segment_output_path(runs_dir: Path, video_id: str, start_time: float) -> Path:
+    return runs_dir / f"{sanitise_name(video_id)}_{format_time_label(start_time)}.jsonl"
 
 
 def parse_videos_field(value: str) -> list[str]:
@@ -220,6 +208,58 @@ def get_video_info_ffprobe(video_path: str) -> tuple[str, float]:
         return "unknown", 0.0
 
 
+_local_video_index: dict[Path, dict[str, Path]] = {}
+
+
+def _get_local_video_index(root_path: Path) -> dict[str, Path]:
+    """Map file names to paths for all files under root_path. Built once per root."""
+    if root_path not in _local_video_index:
+        index: dict[str, Path] = {}
+        for path in sorted(root_path.rglob("*")):
+            if path.is_file():
+                index.setdefault(path.name, path)
+        _local_video_index[root_path] = index
+        logger.info(f"Indexed {len(index)} files in local video folder: {root_path}")
+    return _local_video_index[root_path]
+
+
+def find_existing_local_video(
+    filename: str,
+    repo_root: Path,
+    video_roots: str | Path | list[str | Path] | tuple[str | Path, ...] | None,
+) -> Optional[Path]:
+    if not video_roots:
+        return None
+
+    filename_with_ext = filename if filename.lower().endswith(".mp4") else f"{filename}.mp4"
+    candidate_names = [filename_with_ext]
+    if filename not in candidate_names:
+        candidate_names.append(filename)
+
+    roots = video_roots if isinstance(video_roots, (list, tuple)) else [video_roots]
+
+    for root_value in roots:
+        root_path = resolve_path(root_value, repo_root)
+        if not root_path.exists():
+            logger.debug(f"Configured local video folder does not exist: {root_path}")
+            continue
+
+        for candidate_name in candidate_names:
+            direct_path = root_path / candidate_name
+            if direct_path.exists() and direct_path.is_file():
+                logger.info(f"Using existing local video: {direct_path}")
+                return direct_path.resolve()
+
+        index = _get_local_video_index(root_path)
+        for candidate_name in candidate_names:
+            match = index.get(candidate_name)
+            if match is not None:
+                logger.info(f"Using existing local video: {match}")
+                return match.resolve()
+
+    return None
+
+
 def extract_frames_for_segment(
     ffmpeg_bin: str,
     video_path: Path,
@@ -271,39 +311,39 @@ def extract_frames_for_segment(
         )
 
 
-def run_mapanything(
-    python_bin: str,
-    repo_root: Path,
-    frames_dir: Path,
-    output_jsonl: Path,
-    video_id: str,
-    segment_start_time: float,
-) -> None:
-    demo_script = repo_root / "scripts" / "demo_images_pose_export.py"
-    if not demo_script.exists():
-        raise FileNotFoundError(
-            f"Could not find pose export script at: {demo_script}\n"
-            "Create scripts/demo_images_pose_export.py in the root of the map anything repo."
+class PoseExporter:
+    """Loads the MapAnything model on first use and keeps it for all segments."""
+
+    def __init__(self) -> None:
+        self._model = None
+        self._export_module = None
+
+    def export(
+        self,
+        frames_dir: Path,
+        output_jsonl: Path,
+        video_id: str,
+        segment_start_time: float,
+    ) -> None:
+        if self._model is None:
+            # Loaded lazily so torch and the model are only loaded when there is work to do.
+            # Loaded by path because an installed package also provides a top level "scripts" module.
+            script_path = Path(__file__).resolve().parent / "scripts" / "demo_images_pose_export.py"
+            spec = importlib.util.spec_from_file_location("demo_images_pose_export", script_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            self._export_module = module
+            self._model = module.load_model()
+
+        self._export_module.export_poses(
+            model=self._model,
+            image_folder=frames_dir,
+            output_path=output_jsonl,
+            video_id=video_id,
+            segment_start_time=segment_start_time,
+            fps=float(cfg.mapanything_fps),
         )
-
-    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
-
-    cmd = [
-        python_bin,
-        str(demo_script),
-        "--image_folder",
-        str(frames_dir),
-        "--output_path",
-        str(output_jsonl),
-        "--video_id",
-        video_id,
-        "--segment_start_time",
-        str(segment_start_time),
-        "--fps",
-        str(cfg.mapanything_fps),
-    ]
-
-    run_command(cmd, cwd=repo_root)
 
 
 def load_video_jobs_from_mapping(csv_path: Path) -> list[dict]:
@@ -574,22 +614,20 @@ def download_video_from_server(
 
 
 def process_segments_for_video(
-    repo_root: Path,
+    runs_dir: Path,
     ffmpeg_bin: str,
-    python_bin: str,
+    exporter: PoseExporter,
     downloaded_video_path: Path,
     video_id: str,
     segments: list[tuple[float, float]],
 ) -> list[Path]:
     outputs: list[Path] = []
-    video_work_dir = (repo_root / cfg.runs_dir / sanitise_name(video_id)).resolve()
+    video_work_dir = runs_dir / sanitise_name(video_id)
     video_work_dir.mkdir(parents=True, exist_ok=True)
 
     for idx, (start_time, end_time) in enumerate(segments, start=1):
-        start_label = format_time_label(start_time)
-        frames_dir = video_work_dir / f"frames_{start_label}"
-        output_jsonl = (repo_root / cfg.runs_dir / f"{video_id}_{start_label}.jsonl").resolve()
-        output_jsonl = make_unique_path(output_jsonl)
+        frames_dir = video_work_dir / f"frames_{format_time_label(start_time)}"
+        output_jsonl = segment_output_path(runs_dir, video_id, start_time)
 
         logger.info(
             f"Processing segment {idx}/{len(segments)} for {video_id}: "
@@ -606,9 +644,7 @@ def process_segments_for_video(
             overwrite_frames=bool(cfg.overwrite_frames),
         )
 
-        run_mapanything(
-            python_bin=python_bin,
-            repo_root=repo_root,
+        exporter.export(
             frames_dir=frames_dir,
             output_jsonl=output_jsonl,
             video_id=video_id,
@@ -622,6 +658,9 @@ def process_segments_for_video(
             shutil.rmtree(frames_dir)
             logger.info(f"Deleted frames: {frames_dir}")
 
+    if bool(cfg.delete_frames_after_processing) and video_work_dir.exists() and not any(video_work_dir.iterdir()):
+        video_work_dir.rmdir()
+
     return outputs
 
 
@@ -629,7 +668,7 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parent
     mapping_csv_path = resolve_path(cfg.csv_file, repo_root)
     downloads_dir = resolve_path(cfg.download_dir, repo_root)
-    runs_dir = (repo_root / cfg.runs_dir).resolve()
+    runs_dir = resolve_path(cfg.runs_dir, repo_root)
 
     downloads_dir.mkdir(parents=True, exist_ok=True)
     runs_dir.mkdir(parents=True, exist_ok=True)
@@ -640,13 +679,14 @@ def main() -> int:
         logger.error("Install it first, for example: brew install ffmpeg")
         return 1
 
-    python_bin = sys.executable
-
     demo_script = repo_root / "scripts" / "demo_images_pose_export.py"
     if not demo_script.exists():
         logger.error(f"Could not find: {demo_script}")
         logger.error("Create scripts/demo_images_pose_export.py in the root of the map anything repo.")
         return 1
+
+    exporter = PoseExporter()
+    skipped_segments = 0
 
     logger.info(f"Mapping CSV: {mapping_csv_path}")
     logger.info(f"Temporary download directory: {downloads_dir}")
@@ -673,6 +713,21 @@ def main() -> int:
         video_id = job["video_id"]
         segments = job["segments"]
 
+        if bool(cfg.skip_existing_outputs):
+            pending = [
+                seg for seg in segments
+                if not segment_output_path(runs_dir, video_id, seg[0]).exists()
+            ]
+            skipped_segments += len(segments) - len(pending)
+            if not pending:
+                logger.info(
+                    f"[{index}/{len(jobs)}] Skipping {video_id}: all {len(segments)} segments already exported"
+                )
+                continue
+            if len(pending) < len(segments):
+                logger.info(f"{video_id}: {len(segments) - len(pending)} segments already exported, skipping them")
+            segments = pending
+
         logger.info("=" * 80)
         logger.info(
             f"[{index}/{len(jobs)}] Starting video_id={video_id} locality={locality} row_id={row_id}"
@@ -680,37 +735,52 @@ def main() -> int:
         logger.info(f"Segments to process: {len(segments)}")
         logger.info("=" * 80)
 
-        downloaded_file: Optional[Path] = None
+        video_path_to_process: Optional[Path] = None
+        downloaded_from_server = False
 
         try:
-            result = download_video_from_server(
+            existing_local_video = find_existing_local_video(
                 filename=video_id,
-                base_url=cfg.base_url,
-                out_dir=downloads_dir,
-                username=secrets.ftp_username,
-                password=secrets.ftp_password,
-                token=cfg.token,
-                timeout=int(cfg.timeout),
-                debug=bool(cfg.debug),
-                max_pages=int(cfg.max_pages),
-                aliases=list(cfg.aliases),
+                repo_root=repo_root,
+                video_roots=cfg.videos_root,
             )
 
-            if result is None:
-                raise RuntimeError(f"Download failed or file not found for: {video_id}")
+            if existing_local_video is not None:
+                video_path_to_process = existing_local_video
+                resolution, fps = get_video_info_ffprobe(str(video_path_to_process))
+                logger.info(
+                    f"Using local video {video_path_to_process.name} | resolution={resolution} | fps={fps}"
+                )
+            else:
+                result = download_video_from_server(
+                    filename=video_id,
+                    base_url=cfg.base_url,
+                    out_dir=downloads_dir,
+                    username=secrets.ftp_username,
+                    password=secrets.ftp_password,
+                    token=cfg.token,
+                    timeout=int(cfg.timeout),
+                    debug=bool(cfg.debug),
+                    max_pages=int(cfg.max_pages),
+                    aliases=list(cfg.aliases),
+                )
 
-            local_path, _, resolution, fps = result
-            downloaded_file = Path(local_path)
+                if result is None:
+                    raise RuntimeError(f"Download failed or file not found for: {video_id}")
 
-            logger.info(
-                f"Downloaded {downloaded_file.name} | resolution={resolution} | fps={fps}"
-            )
+                local_path, _, resolution, fps = result
+                video_path_to_process = Path(local_path)
+                downloaded_from_server = True
+
+                logger.info(
+                    f"Downloaded {video_path_to_process.name} | resolution={resolution} | fps={fps}"
+                )
 
             output_files = process_segments_for_video(
-                repo_root=repo_root,
+                runs_dir=runs_dir,
                 ffmpeg_bin=ffmpeg_bin,
-                python_bin=python_bin,
-                downloaded_video_path=downloaded_file,
+                exporter=exporter,
+                downloaded_video_path=video_path_to_process,
                 video_id=video_id,
                 segments=segments,
             )
@@ -725,26 +795,22 @@ def main() -> int:
             logger.error(str(exc))
 
             if not bool(cfg.keep_going):
-                if (
-                    downloaded_file
-                    and downloaded_file.exists()
-                    and bool(cfg.delete_downloaded_video)
-                ):
-                    downloaded_file.unlink()
-                    logger.info(f"Deleted downloaded video: {downloaded_file}")
                 break
 
         finally:
             if (
-                downloaded_file
-                and downloaded_file.exists()
+                downloaded_from_server
+                and video_path_to_process
+                and video_path_to_process.exists()
                 and bool(cfg.delete_downloaded_video)
             ):
-                downloaded_file.unlink()
-                logger.info(f"Deleted downloaded video: {downloaded_file}")
+                video_path_to_process.unlink()
+                logger.info(f"Deleted downloaded video: {video_path_to_process}")
 
     logger.info("=" * 80)
     logger.info("Finished all queued videos")
+    if skipped_segments:
+        logger.info(f"Skipped {skipped_segments} segments with existing outputs")
     logger.info("=" * 80)
 
     if failures:

@@ -42,72 +42,98 @@ def get_secrets(entry_name: str, secret_file_name: str = 'secret') -> Dict[str, 
         return json.load(f)[entry_name]
 
 
+_config_cache = None
+
+
+def _load_json_file(file_name: str):
+    """
+    Load a JSON file from the repository root.
+
+    Args:
+        file_name (str): Name of the file relative to the repository root.
+
+    Returns:
+        dict or None: Parsed content, or None if the file does not exist.
+
+    Raises:
+        json.decoder.JSONDecodeError: If the file is badly formatted.
+    """
+    try:
+        with open(os.path.join(root_dir, file_name)) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
+
 def get_configs(entry_name: str, config_file_name: str = 'config', config_default_file_name: str = 'default.config'):
     """
     Open the config file and return the requested entry.
-    If no config file is found, open default.config.
+    Values in config override default.config. If config does not exist, or does not
+    contain the entry, the value from default.config is used.
 
     Args:
-        entry_name (str): Description
-        config_file_name (str, optional): Description
-        config_default_file_name (str, optional): Description
+        entry_name (str): Name of the entry.
+        config_file_name (str, optional): Name of the user config file.
+        config_default_file_name (str, optional): Name of the default config file.
 
     Returns:
-        TYPE: Description
+        TYPE: Value of the entry.
+
+    Raises:
+        KeyError: If the entry is in neither config nor default.config.
     """
-    # check if config file is updated
-    if not check_config():
-        sys.exit()
-    try:
-        with open(os.path.join(root_dir, config_file_name)) as f:
-            content = json.load(f)
-    except FileNotFoundError:
-        with open(os.path.join(root_dir, config_default_file_name)) as f:
-            content = json.load(f)
-    return content[entry_name]
+    global _config_cache
+    if _config_cache is None:
+        # check if config file is valid
+        if not check_config(config_file_name, config_default_file_name):
+            sys.exit(1)
+        content = dict(_load_json_file(config_default_file_name))
+        content.update(_load_json_file(config_file_name) or {})
+        _config_cache = content
+    return _config_cache[entry_name]
 
 
 def check_config(config_file_name: str = 'config',
                  config_default_file_name: str = 'default.config'):
     """
-    Check if config file has at least as many rows as default.config.
+    Check that default.config exists and that both config files are valid JSON.
+    Warn about entries of default.config missing in config, which fall back to their defaults.
 
     Args:
-        config_file_name (str, optional): Description
-        config_default_file_name (str, optional): Description
+        config_file_name (str, optional): Name of the user config file.
+        config_default_file_name (str, optional): Name of the default config file.
 
     Returns:
-        str: Description.
+        bool: True if the configuration can be used.
     """
-    # load config file
-    try:
-        with open(os.path.join(root_dir, config_file_name)) as f:
-            config = json.load(f)
-    except FileNotFoundError:
-        logger.error('Config file {} not found.', config_file_name)
-        return False
-    except json.decoder.JSONDecodeError:
-        logger.error('Config file badly formatted. Please update based on default.config.', config_file_name)
-        return False
     # load default.config file
     try:
-        with open(os.path.join(root_dir, config_default_file_name)) as f:
-            default = json.load(f)
-    except FileNotFoundError:
-        logger.error('Default config file {} not found.', config_file_name)
-        return False
+        default = _load_json_file(config_default_file_name)
     except json.decoder.JSONDecodeError:
-        logger.error('Config file badly formatted. Please update based on default.config.', config_file_name)
+        logger.error('Default config file {} badly formatted.', config_default_file_name)
         return False
-    # check length of each file
-    if len(config) < len(default):
-        logger.error('Config file has {} variables, which is fewer than {} variables in default.config. Please'
-                     + ' update.',
-                     len(config),
-                     len(default))
+    if default is None:
+        logger.error('Default config file {} not found.', config_default_file_name)
         return False
-    else:
+    # load config file
+    try:
+        config = _load_json_file(config_file_name)
+    except json.decoder.JSONDecodeError:
+        logger.error('Config file {} badly formatted. Please update based on {}.',
+                     config_file_name,
+                     config_default_file_name)
+        return False
+    if config is None:
+        logger.info('Config file {} not found, using {}.', config_file_name, config_default_file_name)
         return True
+    # report entries that are missing in config
+    missing = [key for key in default if key not in config]
+    if missing:
+        logger.warning('Config file {} is missing {}. Using values from {}.',
+                       config_file_name,
+                       ', '.join(missing),
+                       config_default_file_name)
+    return True
 
 
 def search_dict(dictionary, search_for, nested=False):

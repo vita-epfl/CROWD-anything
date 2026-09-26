@@ -1,6 +1,6 @@
 # CROWD-anything
 
-T## Citation and usage of code
+## Citation and usage of code
 If you use this work for academic work please cite the following paper:
 
 > 
@@ -97,20 +97,21 @@ source .venv/bin/activate
 .\.venv\Scripts\activate.bat
 ```
 
-**Step 8:** Ensure that dataset are present. Place required datasets (including **mapping.csv**) into the **data/** directory:
+**Step 8:** Ensure that the data is present. Place **mapping.csv** in the repository root (or set `mapping` in `config`). Videos found in the configured `videos` folders are used directly; missing videos are downloaded from `base_url` using the credentials in the `secret` file (see `default.secret`).
 
 
 **Step 9:** Run the code:
 ```command line
-python3 analysis.py
+python3 main.py
 ```
 
 ### Configuration of project
-Configuration of the project needs to be defined in `config`. Please use the `default.config` file for the required structure of the file. If no custom config file is provided, `default.config` is used. The config file has the following parameters:
+Configuration of the project needs to be defined in `config`. Please use the `default.config` file for the required structure of the file. If no custom config file is provided, `default.config` is used. Values in `config` override `default.config`, and any parameter missing from `config` falls back to its value in `default.config`. The config file has the following parameters:
 
 - **`mapping`**: CSV file containing mapping data used to select videos and time segments.
 - **`videos`**: List of directories containing local video files.
 - **`base_url`**: Base URL of the remote file server used to download videos.
+- **`download_dir`**: Temporary directory for videos downloaded from the file server.
 - **`RUNS_DIR`**: Directory where output JSONL files and intermediate run files are stored.
 - **`MAPANYTHING_FPS`**: Frame sampling rate used for frame extraction and timestamp generation during inference.
 - **`ENABLE_VIZ`**: Enables visualisation related options if supported by the pipeline.
@@ -121,3 +122,23 @@ Configuration of the project needs to be defined in `config`. Please use the `de
 - **`TARGET_LOCALITY`**: Restricts processing to a specific locality from the mapping CSV. Use `null` to process all localities.
 - **`TARGET_ROW_ID`**: Restricts processing to a specific row ID from the mapping CSV. Use `null` to process all rows.
 - **`MAX_VIDEOS_TO_PROCESS`**: Limits the number of videos to process. Use `null` for no limit.
+- **`SKIP_EXISTING_OUTPUTS`**: Skips segments whose output JSONL already exists in `RUNS_DIR`, so interrupted runs can be resumed. Videos whose segments are all done are not downloaded again.
+
+## Tokenization with the LTX-2 video VAE
+The `tokenization` package encodes video clips from a manifest into [LTX-2](https://github.com/Lightricks/LTX-2) video VAE latents. It uses the same preprocessing as `ltx-trainer` (resize keeping aspect ratio, bicubic, center crop, scale to [-1, 1]); audio is not used. Frames are decoded with ffmpeg at 24 fps straight from the source videos, so no clip files are written.
+
+The clip definition (121 frames at 24 fps, 1 frame overlap) and the ffmpeg command in `tokenization/frames.py` are provisional until they are aligned with the manifest codebase.
+
+**Manifest:** JSONL, one clip per line, with the fields `clip_id`, `video_id`, `video_path`, `start_frame` (counted at `fps` from the start of the video), `num_frames` and `fps`.
+
+**Encoding** (install `ltx-core` and `ltx-trainer` from the LTX-2 repository first):
+```bash
+python -m tokenization.encode encode manifest.jsonl latents/ --vae-checkpoint /path/to/ltx-2.x.safetensors --resolution 960x544
+```
+For several GPUs, start one process per GPU (for example with `torchrun --nproc_per_node 4 -m tokenization.encode encode ...`), then build the index once all processes are done:
+```bash
+python -m tokenization.encode index latents/
+```
+Reruns resume where they stopped. An output directory refuses latents encoded with different settings (checkpoint, resolution, clip length, frame decoding).
+
+**Output:** latents are stored per source video in `latents/shards/<xx>/<video_id>.<part>.safetensors` (at most 256 clips per file), with `index.jsonl` listing every clip. `tokenization.shards.LatentClipDataset` loads single clips in the layout of `ltx-trainer`'s precomputed latents (`latents` [C, F', H', W'], `num_frames`, `height`, `width`, `fps`).
