@@ -1,12 +1,13 @@
-"""Sharded storage of clip latents: a few files per source video instead of one file per clip.
+"""Sharded storage of clip latents: usually one file per source video instead of one file per clip.
 
-Layout of an output directory:
+Layout of an output directory (one per resolution):
     encoding_config.json                       settings used to encode (checkpoint, resolution, fps, clip length)
     shards/<xx>/<video_id>.<part>.safetensors  "latents" [N, C, F', H', W'] and "start_frames" [N] for N clips
-    shards/<xx>/<video_id>.done.json           written last; its presence marks the video as complete
+    progress/rank<k>.jsonl                     append-only log per process; a "done" line marks a video complete
     index.jsonl                                one line per clip: clip_id, video_id, start_frame, shard, row
 
-<xx> is two hex characters of a hash of the video id, which keeps directories small.
+<xx> is two hex characters of a hash of the video id, which keeps directories small. Completion is logged instead of
+written as one marker file per video, to keep the number of files (inodes) low.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from safetensors.torch import save_file
 FORMAT_VERSION = "1"
 CONFIG_FILE = "encoding_config.json"
 INDEX_FILE = "index.jsonl"
+PROGRESS_DIR = "progress"
 
 
 def video_shard_dir(out_dir: Path, video_id: str) -> Path:
@@ -32,12 +34,37 @@ def video_shard_dir(out_dir: Path, video_id: str) -> Path:
     return Path(out_dir) / "shards" / prefix
 
 
-def done_marker_path(out_dir: Path, video_id: str) -> Path:
-    return video_shard_dir(out_dir, video_id) / f"{video_id}.done.json"
+def load_done_videos(out_dir: Path) -> dict[str, dict[str, Any]]:
+    """
+    Read all progress logs and return {video_id: done record} for completed videos.
+    The last line per video wins: a "started" line after a "done" line (a re-encode in progress) makes it not done.
+    Truncated lines from an interrupted write are ignored.
+    """
+    state: dict[str, dict[str, Any]] = {}
+    for log_path in sorted((Path(out_dir) / PROGRESS_DIR).glob("*.jsonl")):
+        with log_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    record = json.loads(line)
+                    state[record["video_id"]] = record
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    continue
+    return {vid: rec for vid, rec in state.items() if rec.get("status") == "done"}
 
 
-def is_video_done(out_dir: Path, video_id: str) -> bool:
-    return done_marker_path(out_dir, video_id).exists()
+class ProgressLog:
+    """Append-only log of one process. Each line is flushed to disk before the call returns."""
+
+    def __init__(self, out_dir: Path, rank: int) -> None:
+        directory = Path(out_dir) / PROGRESS_DIR
+        directory.mkdir(parents=True, exist_ok=True)
+        self.path = directory / f"rank{rank}.jsonl"
+
+    def append(self, record: dict[str, Any]) -> None:
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -115,14 +142,15 @@ class VideoShardWriter:
         self._parts.append({"file": name, "clip_ids": self._clip_ids, "start_frames": self._start_frames})
         self._latents, self._clip_ids, self._start_frames = [], [], []
 
-    def finish(self, failed_clip_ids: Optional[list[str]] = None) -> None:
+    def finish(self, failed_clip_ids: Optional[list[str]] = None) -> dict[str, Any]:
+        """Write the remaining clips and return the "done" record for the progress log."""
         self._flush()
-        marker = {
+        return {
             "video_id": self.video_id,
+            "status": "done",
             "parts": self._parts,
             "failed_clip_ids": failed_clip_ids or [],
         }
-        _atomic_write_bytes(done_marker_path(self.out_dir, self.video_id), json.dumps(marker).encode("utf-8"))
 
 
 def glob_escape(value: str) -> str:
@@ -130,19 +158,19 @@ def glob_escape(value: str) -> str:
 
 
 def build_index(out_dir: Path) -> int:
-    """Write index.jsonl from all done markers. Returns the number of clips indexed."""
+    """Write index.jsonl from the progress logs. Returns the number of clips indexed."""
     out_dir = Path(out_dir)
     count = 0
     tmp = out_dir / f".{INDEX_FILE}.{os.getpid()}.tmp"
     with tmp.open("w", encoding="utf-8") as f:
-        for marker_path in sorted((out_dir / "shards").glob("*/*.done.json")):
-            marker = json.loads(marker_path.read_text())
-            for part in marker["parts"]:
-                shard = str((marker_path.parent / part["file"]).relative_to(out_dir))
+        for video_id, done in sorted(load_done_videos(out_dir).items()):
+            shard_dir = video_shard_dir(out_dir, video_id)
+            for part in done["parts"]:
+                shard = str((shard_dir / part["file"]).relative_to(out_dir))
                 for row, (clip_id, start_frame) in enumerate(zip(part["clip_ids"], part["start_frames"])):
                     record = {
                         "clip_id": clip_id,
-                        "video_id": marker["video_id"],
+                        "video_id": video_id,
                         "start_frame": start_frame,
                         "shard": shard,
                         "row": row,

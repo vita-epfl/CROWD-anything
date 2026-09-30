@@ -1,8 +1,11 @@
-"""Decode clip frames from source videos with ffmpeg at a fixed frame rate.
+"""Decode clip frames exactly as the manifest (wm-data-manifest) defines them.
 
-PROVISIONAL: `build_ffmpeg_command` must be replaced by the exact ffmpeg command from the manifest codebase, so every
-consumer (ego trajectory extraction and tokenization) decodes exactly the same frames. Everything else in this module
-only streams raw RGB frames out of that command.
+The manifest addresses frames on a canonical grid: the whole source video resampled through ffmpeg's `fps=24`
+filter, anchored at t=0, frame i at t = i / 24 s (wm_data_manifest.natix.resample, reused for CROWD). The only
+way to get the same frames is to decode the video from its start through that same filter and count frames --
+seeking to a clip's start time can land on different frames, especially for variable frame rate videos. So each
+video is decoded in one pass from t=0; frames outside the requested clips are read and discarded, and decoding
+stops after the last clip.
 """
 
 from __future__ import annotations
@@ -16,25 +19,27 @@ from typing import Iterator, Optional
 
 import numpy as np
 
-from tokenization.clips import Clip, contiguous_runs
+from tokenization.clips import Clip
 
 logger = logging.getLogger(__name__)
 
 # Stored in each output's encoding_config.json. Change it whenever the decoding changes, so latents decoded
 # differently are never mixed in one output directory.
-FRAME_DECODER_VERSION = "provisional-ffmpeg-ss-fps-v1"
+FRAME_DECODER_VERSION = "wm-data-manifest-canonical-fps24-t0-v1"
 
 
-def build_ffmpeg_command(ffmpeg_bin: str, video_path: str, start_frame: int, num_frames: int, fps: float) -> list[str]:
-    """Command that writes `num_frames` rgb24 frames at `fps`, starting at frame `start_frame`, to stdout."""
+def canonical_decode_command(ffmpeg_bin: str, video_path: str, fps: float) -> list[str]:
+    """rgb24 frames of the whole video on the canonical grid, to stdout. Same video stream, filter and sync as
+    wm_data_manifest.natix.resample (canonical_resample_command / count_resampled_frames)."""
     return [
         ffmpeg_bin,
         "-nostdin",
-        "-loglevel", "error",
-        "-ss", f"{start_frame / fps:.6f}",
+        "-v", "error",
         "-i", video_path,
-        "-vf", f"fps={fps}",
-        "-frames:v", str(num_frames),
+        "-map", "0:v:0",
+        "-vf", f"fps={fps:g}",
+        "-vsync", "cfr",
+        "-an",
         "-pix_fmt", "rgb24",
         "-f", "rawvideo",
         "pipe:1",
@@ -68,16 +73,33 @@ def probe_frame_size(video_path: str, ffprobe_bin: Optional[str] = None) -> tupl
     return width, height
 
 
-def _read_exact(stream, num_bytes: int) -> Optional[bytes]:
-    chunks = []
-    remaining = num_bytes
-    while remaining > 0:
-        chunk = stream.read(remaining)
-        if not chunk:
-            return None
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
+def _read_into(stream, buffer: memoryview) -> bool:
+    """Fill `buffer` from `stream`; False if the stream ends first."""
+    filled = 0
+    while filled < len(buffer):
+        n = stream.readinto(buffer[filled:])
+        if not n:
+            return False
+        filled += n
+    return True
+
+
+def count_canonical_frames(video_path: str, fps: float, ffmpeg_bin: Optional[str] = None) -> int:
+    """Number of frames `iter_clip_frames` sees for this video (for checks against the manifest)."""
+    ffmpeg_bin = ffmpeg_bin or shutil.which("ffmpeg")
+    width, height = probe_frame_size(video_path)
+    scratch = memoryview(bytearray(width * height * 3))
+    proc = subprocess.Popen(
+        canonical_decode_command(ffmpeg_bin, video_path, fps), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
+    count = 0
+    try:
+        while _read_into(proc.stdout, scratch):
+            count += 1
+    finally:
+        proc.stdout.close()
+        proc.wait()
+    return count
 
 
 def iter_clip_frames(
@@ -85,9 +107,8 @@ def iter_clip_frames(
     ffmpeg_bin: Optional[str] = None,
 ) -> Iterator[tuple[Clip, Optional[np.ndarray]]]:
     """
-    Yield (clip, frames) for clips of one video, frames as uint8 [F, H, W, 3].
+    Yield (clip, frames) for the clips of one video in start order, frames as uint8 [F, H, W, 3].
     Frames is None when the video ends before the clip is complete.
-    Clips whose frame ranges touch or overlap are decoded in a single ffmpeg pass.
     """
     if not clips:
         return
@@ -98,50 +119,55 @@ def iter_clip_frames(
     clips = sorted(clips, key=lambda c: c.start_frame)
     video_path = clips[0].video_path
     fps = clips[0].fps
-    if any(c.fps != fps for c in clips):
-        raise ValueError(f"Clips of {clips[0].video_id} use different fps values")
+    if any(c.fps != fps or c.video_path != video_path for c in clips):
+        raise ValueError(f"Clips of {clips[0].video_id} use different fps values or video paths")
 
     width, height = probe_frame_size(video_path)
     frame_bytes = width * height * 3
+    scratch = memoryview(bytearray(frame_bytes))
 
-    for run in contiguous_runs(clips):
-        run_start = run[0].start_frame
-        run_end = max(c.end_frame for c in run)
-        cmd = build_ffmpeg_command(ffmpeg_bin, video_path, run_start, run_end - run_start, fps)
-        # stderr goes to a file: an unread pipe could fill up and block ffmpeg on corrupt videos
-        stderr_file = tempfile.TemporaryFile()
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr_file)
-        try:
-            buffer: list[np.ndarray] = []
-            buffer_start = run_start
-            exhausted = False
-            for clip in run:
-                # drop frames before this clip
-                drop = clip.start_frame - buffer_start
-                if drop > 0:
-                    del buffer[:drop]
-                    buffer_start = clip.start_frame
-                # read until the buffer covers the clip
-                while not exhausted and buffer_start + len(buffer) < clip.end_frame:
-                    raw = _read_exact(proc.stdout, frame_bytes)
-                    if raw is None:
-                        exhausted = True
-                        break
-                    buffer.append(np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3))
-                if buffer_start + len(buffer) < clip.end_frame:
-                    stderr_file.seek(0)
-                    error_tail = stderr_file.read()[-500:].decode(errors="replace").strip()
-                    message = (
-                        f"{clip.video_id}: video ended at frame {buffer_start + len(buffer)}, "
-                        f"clip {clip.clip_id} needs up to {clip.end_frame}"
-                    )
-                    logger.warning(message + (f" | ffmpeg: {error_tail}" if error_tail else ""))
-                    yield clip, None
-                else:
-                    yield clip, np.stack(buffer[: clip.num_frames])
-        finally:
-            if proc.stdout:
-                proc.stdout.close()
-            proc.kill()
-            proc.wait()
-            stderr_file.close()
+    # stderr goes to a file: an unread pipe could fill up and block ffmpeg on corrupt videos
+    stderr_file = tempfile.TemporaryFile()
+    proc = subprocess.Popen(canonical_decode_command(ffmpeg_bin, video_path, fps), stdout=subprocess.PIPE,
+                            stderr=stderr_file)
+    try:
+        next_frame = 0  # index of the next frame ffmpeg will output
+        buffer: list[np.ndarray] = []  # frames [buffer_start, next_frame) kept for the current clip(s)
+        buffer_start = 0
+        exhausted = False
+        for clip in clips:
+            # drop kept frames before this clip, then skip frames up to its start
+            if clip.start_frame >= next_frame:
+                buffer, buffer_start = [], next_frame
+            else:
+                del buffer[: clip.start_frame - buffer_start]
+                buffer_start = clip.start_frame
+            while not exhausted and next_frame < clip.start_frame:
+                exhausted = not _read_into(proc.stdout, scratch)
+                if not exhausted:
+                    next_frame += 1
+                    buffer_start = next_frame
+            # read until the clip is complete
+            while not exhausted and next_frame < clip.end_frame:
+                frame = np.empty((height, width, 3), dtype=np.uint8)
+                exhausted = not _read_into(proc.stdout, memoryview(frame).cast("B"))
+                if not exhausted:
+                    buffer.append(frame)
+                    next_frame += 1
+            if next_frame < clip.end_frame:
+                stderr_file.seek(0)
+                error_tail = stderr_file.read()[-500:].decode(errors="replace").strip()
+                message = (
+                    f"{clip.video_id}: video ended at frame {next_frame}, "
+                    f"clip {clip.clip_id} needs up to {clip.end_frame}"
+                )
+                logger.warning(message + (f" | ffmpeg: {error_tail}" if error_tail else ""))
+                yield clip, None
+            else:
+                yield clip, np.stack(buffer[: clip.num_frames])
+    finally:
+        if proc.stdout:
+            proc.stdout.close()
+        proc.kill()
+        proc.wait()
+        stderr_file.close()

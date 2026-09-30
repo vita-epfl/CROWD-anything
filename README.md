@@ -125,20 +125,18 @@ Configuration of the project needs to be defined in `config`. Please use the `de
 - **`SKIP_EXISTING_OUTPUTS`**: Skips segments whose output JSONL already exists in `RUNS_DIR`, so interrupted runs can be resumed. Videos whose segments are all done are not downloaded again.
 
 ## Tokenization with the LTX-2 video VAE
-The `tokenization` package encodes video clips from a manifest into [LTX-2](https://github.com/Lightricks/LTX-2) video VAE latents. It uses the same preprocessing as `ltx-trainer` (resize keeping aspect ratio, bicubic, center crop, scale to [-1, 1]); audio is not used. Frames are decoded with ffmpeg at 24 fps straight from the source videos, so no clip files are written.
+The `tokenization` package encodes the clips of a [wm-data-manifest](../wm-data-manifest) sample manifest into [LTX-2](https://github.com/Lightricks/LTX-2) video VAE latents (the DiffVAE, `vae/ltx-2.5-video-vae-bf16.safetensors` from LTX-2.5); audio is not used. Only the VAE encoder runs.
 
-The clip definition (121 frames at 24 fps, 1 frame overlap) and the ffmpeg command in `tokenization/frames.py` are provisional until they are aligned with the manifest codebase.
-
-**Manifest:** JSONL, one clip per line, with the fields `clip_id`, `video_id`, `video_path`, `start_frame` (counted at `fps` from the start of the video), `num_frames` and `fps`.
+**Frames** are decoded exactly as the manifest defines them: each video in one ffmpeg pass from its start through the canonical `fps=24` filter (frame *i* at *t = i / 24*), then the manifest's `[start_frame, end_frame)` ranges (121 frames, consecutive clips sharing one frame) are taken from that stream. Tests check this against wm-data-manifest's own `count_resampled_frames` and `canonical_resample_command`, including for variable frame rate videos. Preprocessing is the same as `ltx-trainer`'s (resize keeping aspect ratio, bicubic, center crop, scale to [-1, 1]).
 
 **Encoding** (install `ltx-core` and `ltx-trainer` from the LTX-2 repository first):
 ```bash
-python -m tokenization.encode encode manifest.jsonl latents/ --vae-checkpoint /path/to/ltx-2.x.safetensors --resolution 960x544
+python -m tokenization.encode encode samples_24fps.parquet latents/ --video-root /path/to/crowd/videos --vae-checkpoint /path/to/vae/ltx-2.5-video-vae-bf16.safetensors --resolution 960x544 512x288
 ```
-For several GPUs, start one process per GPU (for example with `torchrun --nproc_per_node 4 -m tokenization.encode encode ...`), then build the index once all processes are done:
+The manifest can be the consolidated parquet file or its partition directory; `--countries` restricts it. For several GPUs, start one process per GPU (for example with `torchrun --nproc_per_node 4 -m tokenization.encode encode ...`), then build the index once all processes are done:
 ```bash
 python -m tokenization.encode index latents/
 ```
-Reruns resume where they stopped. An output directory refuses latents encoded with different settings (checkpoint, resolution, clip length, frame decoding).
+Each resolution is written to its own directory (`latents/960x544/`, `latents/512x288/`, ...). Every video is decoded once and encoded at every requested resolution, and a resolution can be added later without re-encoding the others. Reruns resume where they stopped. An output directory refuses latents encoded with different settings (checkpoint, clip length, frame decoding).
 
-**Output:** latents are stored per source video in `latents/shards/<xx>/<video_id>.<part>.safetensors` (at most 256 clips per file), with `index.jsonl` listing every clip. `tokenization.shards.LatentClipDataset` loads single clips in the layout of `ltx-trainer`'s precomputed latents (`latents` [C, F', H', W'], `num_frames`, `height`, `width`, `fps`).
+**Output:** per resolution, latents are stored per source video in `shards/<xx>/<video_id>.<part>.safetensors` (at most 1024 clips per file, so almost always one file per video), progress is logged in one `progress/rank<k>.jsonl` per process, and `index.jsonl` lists every clip. For the full CROWD mapping this is about 76k files per resolution. `tokenization.shards.LatentClipDataset` loads single clips in the layout of `ltx-trainer`'s precomputed latents (`latents` [C, F', H', W'], `num_frames`, `height`, `width`, `fps`).
