@@ -10,7 +10,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any, Optional, Set
 from urllib.parse import urljoin, urlparse
 
@@ -316,7 +316,7 @@ class PoseExporter:
 
     def __init__(self) -> None:
         self._model: Any = None
-        self._export_module: Optional[ModuleType] = None
+        self._export_module: Any = None  # scripts/demo_images_pose_export.py, loaded on first use
 
     def export(
         self,
@@ -332,8 +332,10 @@ class PoseExporter:
             spec = importlib.util.spec_from_file_location("demo_images_pose_export", script_path)
             if spec is None or spec.loader is None:
                 raise ImportError(f"Could not load {script_path}")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            # Any: a module loaded by path has no static type, and older typeshed types the loader too loosely
+            module: Any = importlib.util.module_from_spec(spec)
+            loader: Any = spec.loader
+            loader.exec_module(module)
 
             self._model = module.load_model()
             self._export_module = module
@@ -518,6 +520,15 @@ def download_video_from_server(
                 logger.error(f"Download failed for {local_path.name}: {e}")
                 return False
 
+        def download(response: requests.Response) -> Optional[tuple[str, str, str, float]]:
+            """Save the response as the video file and return (path, video id, resolution, fps)."""
+            local_path = out_dir_path / filename_with_ext
+            if not save_response_to_file(response, local_path):
+                return None
+            resolution, fps = get_video_info_ffprobe(str(local_path))
+            logger.info(f"Saved '{filename_with_ext}' (res={resolution}, fps={fps})")
+            return str(local_path), Path(filename_with_ext).stem, resolution, fps
+
         for alias in aliases:
             direct_url = urljoin(base, f"v/{alias}/files/{filename_with_ext}")
             logger.debug(f"Trying direct URL: {direct_url}")
@@ -527,14 +538,7 @@ def download_video_from_server(
                 continue
 
             logger.info(f"Found file via direct URL: {direct_url}")
-            local_path = out_dir_path / filename_with_ext
-
-            if not save_response_to_file(response, local_path):
-                return None
-
-            resolution, fps = get_video_info_ffprobe(str(local_path))
-            logger.info(f"Saved '{filename_with_ext}' (res={resolution}, fps={fps})")
-            return str(local_path), Path(filename_with_ext).stem, resolution, fps
+            return download(response)
 
         visited: Set[str] = set()
 
@@ -602,14 +606,7 @@ def download_video_from_server(
             if response is None:
                 continue
 
-            local_path = out_dir_path / filename_with_ext
-
-            if not save_response_to_file(response, local_path):
-                return None
-
-            resolution, fps = get_video_info_ffprobe(str(local_path))
-            logger.info(f"Saved '{filename_with_ext}' (res={resolution}, fps={fps})")
-            return str(local_path), Path(filename_with_ext).stem, resolution, fps
+            return download(response)
 
         logger.warning(f"File '{filename_with_ext}' not found in any alias.")
         return None
