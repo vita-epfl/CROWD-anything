@@ -10,7 +10,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, Optional, Set
 from urllib.parse import urljoin, urlparse
 
@@ -315,8 +315,8 @@ class PoseExporter:
     """Loads the MapAnything model on first use and keeps it for all segments."""
 
     def __init__(self) -> None:
-        self._model = None
-        self._export_module = None
+        self._model: Any = None
+        self._export_module: Optional[ModuleType] = None
 
     def export(
         self,
@@ -325,16 +325,18 @@ class PoseExporter:
         video_id: str,
         segment_start_time: float,
     ) -> None:
-        if self._model is None:
+        if self._export_module is None:
             # Loaded lazily so torch and the model are only loaded when there is work to do.
             # Loaded by path because an installed package also provides a top level "scripts" module.
             script_path = Path(__file__).resolve().parent / "scripts" / "demo_images_pose_export.py"
             spec = importlib.util.spec_from_file_location("demo_images_pose_export", script_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not load {script_path}")
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
-            self._export_module = module
             self._model = module.load_model()
+            self._export_module = module
 
         self._export_module.export_poses(
             model=self._model,

@@ -87,11 +87,14 @@ def _read_into(stream, buffer: memoryview) -> bool:
 def count_canonical_frames(video_path: str, fps: float, ffmpeg_bin: Optional[str] = None) -> int:
     """Number of frames `iter_clip_frames` sees for this video (for checks against the manifest)."""
     ffmpeg_bin = ffmpeg_bin or shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        raise RuntimeError("ffmpeg was not found on PATH")
     width, height = probe_frame_size(video_path)
     scratch = memoryview(bytearray(width * height * 3))
     proc = subprocess.Popen(
         canonical_decode_command(ffmpeg_bin, video_path, fps), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
     )
+    assert proc.stdout is not None  # stdout=PIPE
     count = 0
     try:
         while _read_into(proc.stdout, scratch):
