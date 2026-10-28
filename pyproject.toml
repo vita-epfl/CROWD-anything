@@ -68,6 +68,10 @@ all = [
     "mapanything[radio]",
     "mapanything[rmvd]",
 ]
+eval = [
+    "lpips>=0.1.4",
+    "scikit-image>=0.26.0",
+]
 
 # Setuptools configuration
 [tool.setuptools]

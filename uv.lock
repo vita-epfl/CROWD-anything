@@ -1773,6 +1773,22 @@ wheels = [
 ]
 
 [[package]]
+name = "lpips"
+version = "0.1.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+    { name = "torch" },
+    { name = "torchvision" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e8/2d/4b8148d32f5bd461eb7d5daa54fcc998f86eaa709a57f4ef6aa4c62f024f/lpips-0.1.4.tar.gz", hash = "sha256:3846331df6c69688aec3d300a5eeef6c529435bc8460bd58201c3d62e56188fa", size = 18029, upload-time = "2021-08-25T22:10:32.803Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9b/13/1df50c7925d9d2746702719f40e864f51ed66f307b20ad32392f1ad2bb87/lpips-0.1.4-py3-none-any.whl", hash = "sha256:fd537af5828b69d2e6ffc0a397bd506dbc28ca183543617690844c08e102ec5e", size = 53763, upload-time = "2021-08-25T22:10:31.257Z" },
+]
+
+[[package]]
 name = "lxml"
 version = "6.0.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2034,6 +2050,10 @@ dust3r = [
     { name = "croco" },
     { name = "dust3r" },
 ]
+eval = [
+    { name = "lpips" },
+    { name = "scikit-image" },
+]
 gradio = [
     { name = "gradio" },
     { name = "spaces" },
@@ -2068,6 +2088,7 @@ requires-dist = [
     { name = "huggingface-hub" },
     { name = "hydra-core" },
     { name = "lightglue", marker = "extra == 'colmap'", git = "https://github.com/cvg/LightGlue.git" },
+    { name = "lpips", marker = "extra == 'eval'", specifier = ">=0.1.4" },
     { name = "mapanything", extras = ["anycalib"], marker = "extra == 'all'" },
     { name = "mapanything", extras = ["colmap"], marker = "extra == 'all'" },
     { name = "mapanything", extras = ["data"], marker = "extra == 'all'" },
@@ -2103,6 +2124,7 @@ requires-dist = [
     { name = "rmvd", marker = "extra == 'rmvd'", git = "https://github.com/infinity1096/robustmvd.git?rev=master" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "safetensors" },
+    { name = "scikit-image", marker = "extra == 'eval'", specifier = ">=0.26.0" },
     { name = "spaces", marker = "extra == 'gradio'" },
     { name = "tensorboard" },
     { name = "timm", marker = "extra == 'radio'" },
@@ -2110,7 +2132,7 @@ requires-dist = [
     { name = "trimesh" },
     { name = "uniception", specifier = "==0.1.6" },
 ]
-provides-extras = ["data", "dev", "colmap", "gradio", "radio", "anycalib", "dust3r", "mast3r", "must3r", "pi3", "pow3r", "depth-anything-3", "rmvd", "all"]
+provides-extras = ["data", "dev", "colmap", "gradio", "radio", "anycalib", "dust3r", "mast3r", "must3r", "pi3", "pow3r", "depth-anything-3", "rmvd", "all", "eval"]
 
 [[package]]
 name = "mapbox-earcut"
