@@ -43,7 +43,7 @@ cfg = SimpleNamespace(
     timeout=_cfg("timeout", 20),  # request timeout in seconds
     max_pages=_cfg("max_pages", 500),  # crawl depth limit when browsing aliases
     debug=_cfg("debug", True),  # enable verbose downloader logging
-    aliases=_cfg("aliases", ["tue1", "tue2", "tue3", "tue4"]),  # server aliases to try
+    aliases=_cfg("aliases", ["tue3", "tue4", "tue5"]),  # file-server folders (the video drives crowd-tue-3/4/5)
     download_dir=_cfg("download_dir", "downloads"),  # temporary folder for downloaded videos
     runs_dir=_cfg("RUNS_DIR", "runs"),  # folder where JSONL outputs and frame folders are written
     mapanything_fps=_cfg("MAPANYTHING_FPS", 0.01),  # frame sampling FPS used for extraction and timestamps
@@ -456,7 +456,7 @@ def download_video_from_server(
     if password == "":
         password = None
 
-    aliases = aliases or ["tue1", "tue2", "tue3", "tue4"]
+    aliases = aliases or ["tue3", "tue4", "tue5"]
 
     filename_with_ext = filename if filename.lower().endswith(".mp4") else f"{filename}.mp4"
     filename_lower = filename_with_ext.lower()
