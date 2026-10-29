@@ -250,6 +250,7 @@ def test_load_manifest_from_partitions_with_country_filter(tmp_path):
     for country, start in (("A", 0), ("B", 120)):
         write_manifest(parts / f"country={country}" / "part-000.parquet", [clip(video, start, video_id="v")],
                        tmp_path / "videos", country)
+    (parts / "partitions.json").write_text('{"A": 1, "B": 1}')  # written by wm-data-manifest beside the partitions
     assert [c.start_frame for c in load_manifest(parts, tmp_path / "videos")] == [0, 120]
     only_b = load_manifest(parts, tmp_path / "videos", filters=[("country", "in", ["B"])])
     assert [(c.start_frame, c.video_path) for c in only_b] == [(120, str(video))]

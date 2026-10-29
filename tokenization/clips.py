@@ -35,8 +35,14 @@ class Clip:
 def load_manifest(path: str | Path, video_root: str | Path, filters: Optional[list] = None) -> list[Clip]:
     """Clips of a parquet manifest (file or directory of partitions). `filters` is passed to pyarrow, e.g.
     [("country", "=", "Canada")]."""
-    # partitioning=None: partition directories (country=<Country>/) repeat a column already in the files
-    table = pq.read_table(path, filters=filters, partitioning=None)
+    # A directory holds partition files (country=<Country>/part-NNN.parquet) next to other files such as
+    # wm-data-manifest's partitions.json, so read only its parquet files. partitioning=None: the partition directory
+    # names repeat a column already in the files.
+    source = Path(path)
+    files = [str(f) for f in sorted(source.glob("**/*.parquet"))] if source.is_dir() else [str(source)]
+    if not files:
+        raise FileNotFoundError(f"no parquet files in {path}")
+    table = pq.ParquetDataset(files, filters=filters, partitioning=None).read()
     missing = [c for c in REQUIRED_COLUMNS if c not in table.column_names]
     if missing:
         raise ValueError(f"{path} is missing columns: {', '.join(missing)}")
