@@ -22,6 +22,28 @@ python -m evaluation.paired --generated gen/ --reference gt/ --out results/model
 Pairs can also come from a CSV (`--pairs`, columns `clip_id,generated,reference`). Videos are read only up to the
 longest horizon, so the `all` row covers at most that length. `per_frame.csv` shows how the error grows over time.
 
+`evaluation.topology` (part 1, OSM topology): does a generated video show the road topology of the map it was given?
+Facts are read off OpenStreetMap along each clip's trajectory (`evaluation.osm`; Overpass API, cached), as closed
+sets: road type, lanes, one-way, the first intersection passed (none / T-junction / crossroads / roundabout),
+pedestrian crossing, traffic signals, and the turn the car makes. Each fact is asked as a multiple-choice question
+(`evaluation.vqa`) on frames of the generated and the ground-truth video, through any OpenAI-compatible VLM server
+(e.g. vLLM). A fact the map cannot support (e.g. no `lanes` tag) is not asked.
+
+```bash
+python -m evaluation.topology facts --trajectories trajs/ --out facts.json        # trajs/<clip_id>.csv: lat,lon
+python -m evaluation.topology score --clips clips.csv --facts facts.json --out results/model_a \
+    --vqa-url http://localhost:8000/v1 --model <served VLM>                       # clips.csv: clip_id,generated,reference
+```
+
+`per_attribute.csv` reports, per attribute, the accuracy of the generated and the reference video against OSM,
+`normalized` (generated / reference accuracy on the same clips, so the VLM's own errors on real video do not count
+against the model), `agreement` (same answer on both), and `control`: accuracy against another clip's facts (a
+wrong-location map), which must be clearly lower than the accuracy for the topology signal to be measured at all.
+`chance` and `majority` give the trivial baselines. Before generated videos exist, run `score` with only the
+reference column to check, per attribute, that real videos score well above `control` and `majority`; attributes
+that do not are not usable with that VLM. To be adapted once the topology data format (David) and the eval set
+(Yasi) are known: the input of `facts` (here WGS84 positions) and the choice of VLM ("qwen-drive").
+
 ## WorldLens (CVPR 2026, github.com/worldbench/WorldLens) and what applies to us
 
 WorldLens has 24 dimensions in 5 aspects. Its toolkit is built for nuScenes (6 cameras, 3D boxes, maps) and an old
