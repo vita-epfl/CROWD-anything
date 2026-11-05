@@ -29,16 +29,16 @@ QUESTIONS = {
     "road_type": "What kind of road is the camera car driving on at the start of the video?",
     "lanes": "How many lanes are there in the camera car's direction of travel at the start of the video?",
     "oneway": "Is the road the camera car drives on at the start a one-way road?",
-    "intersection": "What is the first intersection the camera car drives through in this video?",
-    "pedestrian_crossing": "Does the camera car pass a pedestrian crossing in this video?",
-    "traffic_signals": "Does the camera car pass traffic lights in this video?",
+    "intersection": "What is the first intersection ahead of the camera car in this video?",
+    "pedestrian_crossing": "Is there a pedestrian crossing (zebra crossing) ahead of the camera car in this video?",
+    "traffic_signals": "Are there traffic lights ahead of the camera car in this video?",
     "turn": "Over the whole video, does the camera car go straight, turn left or turn right?",
 }
 
 OPTION_TEXT = {  # what the model reads for each option value; the scoring uses the values
     "road_type": {"motorway": "motorway or expressway", "major road": "major road (main street, arterial)",
                   "minor road": "minor road (residential or side street)"},
-    "intersection": {"none": "none: no intersection", "T-junction": "T-junction (three-way)",
+    "intersection": {"none": "none: no intersection ahead", "T-junction": "T-junction (three-way)",
                      "crossroads": "crossroads (four-way or more)", "roundabout": "roundabout"},
 }
 

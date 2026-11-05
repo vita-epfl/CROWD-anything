@@ -7,8 +7,10 @@ import numpy as np
 import pytest
 
 from evaluation import osm, topology, vqa
+from evaluation.caption_leaks import check_captions, leaks, rewrite
 from evaluation.osm import OsmData, parse_overpass, topology_facts
-from evaluation.topology import Clip, ask_all, score, summarize
+from evaluation.route_records import facts_from_record, load_records
+from evaluation.topology import apply_leaks, ask_all, export_batch, read_batch_answers, score, summarize
 from evaluation.vqa import OpenAICompatibleVqa, ScriptedVqa, parse_letter, question_for
 
 LAT, LON = 46.52, 6.63
@@ -129,15 +131,18 @@ def test_score_metrics():
     reference = {"a": "yes", "b": "no", "c": "yes", "d": "no"}  # 3 of 4 right
     generated = {"a": "yes", "b": "yes", "c": "no", "d": "yes"}  # 2 of 4 right
     answers = [_record(c, "reference", "oneway", t, reference[c]) for c, t in truths.items()]
-    answers += [_record(c, "generated", "oneway", t, generated[c]) for c, t in truths.items()]
-    (row,) = score(answers)
-    assert (row["accuracy_reference"], row["accuracy_generated"]) == (0.75, 0.5)
-    assert row["normalized"] == pytest.approx(0.5 / 0.75)
-    assert row["agreement"] == 0.25  # only clip a
+    answers += [_record(c, "top_i2v", "oneway", t, generated[c]) for c, t in truths.items()]
+    rows = {r["side"]: r for r in score(answers)}
+    assert list(rows) == ["reference", "top_i2v"]  # reference first
+    ref, gen = rows["reference"], rows["top_i2v"]
+    assert (ref["accuracy"], gen["accuracy"]) == (0.75, 0.5)
+    assert gen["normalized"] == pytest.approx(0.5 / 0.75) and ref["normalized"] == 1.0
+    assert gen["agreement"] == 0.25  # only clip a
     # control truths (next clip's): a->no, b->yes, c->yes, d->yes
-    assert row["control_generated"] == 0.5 and row["control_reference"] == 0.25
-    assert (row["chance"], row["majority"]) == (0.5, 0.75)
-    assert summarize([row])["normalized"] == pytest.approx(2 / 3)
+    assert gen["control"] == 0.5 and ref["control"] == 0.25
+    assert (gen["chance"], gen["majority"]) == (0.5, 0.75)
+    summary = {s["side"]: s for s in summarize(list(rows.values()))}
+    assert summary["top_i2v"]["normalized"] == pytest.approx(2 / 3)
 
 
 def _make_video(path: Path, seconds: int = 3):
@@ -156,15 +161,98 @@ def test_ask_all_end_to_end_and_resume(tmp_path):
     # the generated video gets no answer for "turn"
     table = {(str(ref), "oneway"): "yes", (str(ref), "turn"): "left", (str(gen), "oneway"): "no"}
     model = ScriptedVqa(table)
-    clips = [Clip("c1", {"generated": str(gen), "reference": str(ref)})]
+    clips = {"c1": {"top_t2v": str(gen), "reference": str(ref)}}
     answers_path = tmp_path / "out" / "answers.jsonl"
     answers = ask_all(clips, facts, model, answers_path, num_frames=4)
-    assert len(answers) == 4  # 2 known attributes x 2 sides; unknown attributes are skipped
-    rows = {r["attribute"]: r for r in score(answers)}
-    assert rows["oneway"]["accuracy_reference"] == 1.0 and rows["oneway"]["accuracy_generated"] == 0.0
-    assert rows["turn"]["unanswered_generated"] == 1
+    assert len(answers) == 4  # 2 known attributes x 2 videos; unknown attributes are skipped
+    rows = {(r["attribute"], r["side"]): r for r in score(answers)}
+    assert rows[("oneway", "reference")]["accuracy"] == 1.0 and rows[("oneway", "top_t2v")]["accuracy"] == 0.0
+    assert rows[("turn", "top_t2v")]["unanswered"] == 1
     # a rerun asks nothing again
     ask_all(clips, facts, model, answers_path, num_frames=4)
     assert len(answers_path.read_text().splitlines()) == 4
     summary = topology.write_results(score(answers), tmp_path / "out")
-    assert (tmp_path / "out" / "per_attribute.csv").is_file() and summary["attributes"] == 2
+    assert (tmp_path / "out" / "per_attribute.csv").is_file()
+    assert [s["side"] for s in summary] == ["reference", "top_t2v"]
+
+
+def test_export_and_read_batch_answers(tmp_path):
+    clips = {"s1": {"reference": "/v/s1_gt.mp4", "top_i2v": "/v/s1_top.mp4"}, "s2": {"reference": "/v/s2_gt.mp4"}}
+    facts = {"s1": {"oneway": "yes", "turn": "left"}, "s2": {"oneway": "no"}}
+    export_batch(clips, facts, tmp_path)
+    videos = json.loads((tmp_path / "videos.json").read_text())["videos"]
+    prompts = {p["id"]: p for p in json.loads((tmp_path / "prompts.json").read_text())["prompts"]}
+    assert {v["id"] for v in videos} == {"s1::reference", "s1::top_i2v", "s2::reference"}
+    assert set(prompts["oneway"]["video_ids"]) == {"s1::reference", "s1::top_i2v", "s2::reference"}
+    assert prompts["turn"]["video_ids"] == ["s1::reference", "s1::top_i2v"] and "A. yes" in prompts["oneway"]["text"]
+
+    results = [
+        {"video_id": "s1::reference", "prompt_id": "oneway", "status": "ok", "answer": "A"},
+        {"video_id": "s1::top_i2v", "prompt_id": "oneway", "status": "ok", "answer": "The answer is B."},
+        {"video_id": "s2::reference", "prompt_id": "oneway", "status": "error", "answer": None},
+        {"video_id": "s1::reference", "prompt_id": "turn", "status": "ok", "answer": "B"},
+    ]
+    (tmp_path / "answers.json").write_text(json.dumps({"results": results}))
+    records = {(r["clip_id"], r["side"], r["attribute"]): r for r in
+               read_batch_answers(tmp_path / "answers.json", apply_leaks(facts, {"s1": {"leaked": {"turn": ["x"]}}}),
+                                  "qwen-drive")}
+    assert records[("s1", "reference", "oneway")]["answer"] == "yes"
+    assert records[("s1", "top_i2v", "oneway")]["answer"] == "no"
+    assert records[("s2", "reference", "oneway")]["answer"] is None
+    assert ("s1", "reference", "turn") not in records  # leaked by the caption: not scored
+
+
+def record(roads=None, events=(), maneuver=None):
+    road = {"road_class": "secondary", "one_way": False, "lanes": 2, "lanes_source": "map"}
+    road.update(roads or {})
+    return {"roads": [road], "events": list(events), "maneuver": maneuver or {"kind": "straight"}}
+
+
+def event(kind, dist, **extra):
+    return {"type": kind, "dist_from_start_m": dist, **extra}
+
+
+def test_facts_from_route_record():
+    rec = record(events=[event("side_road", 20), event("crossing", 40, subtype="marked"), event("roundabout", 55),
+                         event("signals", 150)])
+    assert facts_from_record(rec) == {
+        "road_type": "major road", "oneway": "no", "lanes": "2", "intersection": "roundabout",
+        "pedestrian_crossing": "yes", "traffic_signals": "no", "turn": "straight",  # signals beyond 100 m: not seen
+    }
+    rec = record(roads={"road_class": "trunk", "one_way": True, "lanes": 3, "lanes_source": None},
+                 events=[event("fork", 30), event("t_junction", 60), event("signals", 50, direction_known=False)],
+                 maneuver={"kind": "slight", "direction": "left"})
+    facts = facts_from_record(rec)
+    # lanes not from the map, a fork first, "possibly" signals and a slight bend give no fact
+    assert facts == {"road_type": "motorway", "oneway": "yes", "pedestrian_crossing": "no"}
+    assert facts_from_record(record(events=[event("intersection", 80, arms=4)],
+                                    maneuver={"kind": "turn", "direction": "right"}))["intersection"] == "crossroads"
+    assert facts_from_record(record(maneuver={"kind": "turn", "direction": "right"}))["turn"] == "right"
+    assert facts_from_record(record())["intersection"] == "none"
+
+
+def test_load_records(tmp_path):
+    import zipfile
+
+    sid = "Croatia/x/FRONT.mp4#f000360"
+    with zipfile.ZipFile(tmp_path / "s.zip", "w") as z:
+        z.writestr("text.jsonl", json.dumps({"sample_id": sid, **record()}) + "\n"
+                   + json.dumps({"sample_id": "other#f000000", **record()}) + "\n")
+    (tmp_path / "index.jsonl").write_text(json.dumps({"sample_id": sid, "image": "s.zip::a.webp"}) + "\n")
+    records = load_records(tmp_path, [sid, "missing#f000000"])
+    assert list(records) == [sid] and records[sid]["roads"][0]["road_class"] == "secondary"
+
+
+def test_caption_leaks():
+    caption = ("The camera begins with a static view of the plaza and storefront. It then initiates a smooth pan to "
+               "the left, revealing a pedestrian crossing sign and the adjacent street. The pedestrian walks along "
+               "the pavement and steps onto the crosswalk, crossing the street from left to right.")
+    assert leaks(caption) == {"pedestrian_crossing": ["crosswalk", "pedestrian crossing"]}
+    assert rewrite(caption) == "The camera begins with a static view of the plaza and storefront."
+    assert leaks("The car turns left at the roundabout on a two-lane road.") == {
+        "intersection": ["roundabout"], "lanes": ["two-lane"], "turn": ["turns left"]}
+    result = check_captions([{"sample_id": "s1", "caption": caption}, {"sample_id": "s1", "caption": caption},
+                             {"sample_id": "s2", "caption": "A sunny day."}])
+    assert result["s2"]["leaked"] == {} and result["s2"]["rewritten"] == "A sunny day."
+    with pytest.raises(ValueError, match="different captions"):
+        check_captions([{"sample_id": "s1", "caption": "a"}, {"sample_id": "s1", "caption": "b"}])
