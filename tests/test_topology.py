@@ -256,3 +256,19 @@ def test_caption_leaks():
     assert result["s2"]["leaked"] == {} and result["s2"]["rewritten"] == "A sunny day."
     with pytest.raises(ValueError, match="different captions"):
         check_captions([{"sample_id": "s1", "caption": "a"}, {"sample_id": "s1", "caption": "b"}])
+
+
+@pytest.mark.parametrize("text,attribute", [
+    ("A van approaches from the opposite direction.", "oneway"),
+    ("Oncoming traffic is visible.", "oneway"),
+    ("The road curves gently to the right.", "turn"),
+    ("A stop sign stands on the corner.", "intersection"),
+    ("A dashed white center line runs ahead.", "lanes"),
+    ("A sign shows a speed limit of 40 km/h.", "speed_limit"),
+])
+def test_indirect_leaks(text, attribute):
+    assert attribute in leaks(text)
+
+
+def test_harmless_phrases_are_not_leaks():
+    assert leaks("The car follows a silver SUV in the same lane past parked cars and trees.") == {}

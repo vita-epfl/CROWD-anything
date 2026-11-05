@@ -18,16 +18,24 @@ import re
 from pathlib import Path
 
 PATTERNS: dict[str, str] = {
-    "lanes": r"\b(?:one|two|three|four|single|double|multi|\d+)[- ]lanes?\b|\blanes\b|\blane markings?\b",
+    "lanes": r"\b(?:one|two|three|four|single|double|multi|\d+)[- ]lanes?\b|\blanes\b|\blane markings?\b"
+             r"|\b(?:adjacent|left|right|opposite|opposing|travel|ego|left-hand|right-hand) lane\b"
+             r"|\bcent(?:er|re) ?lines?\b|\b(?:dashed|solid|double) (?:white|yellow) lines?\b",
     "intersection": r"\bintersections?\b|\bjunctions?\b|\bcrossroads?\b|\broundabouts?\b|\btraffic circles?\b"
-                    r"|\bside (?:road|street)s?\b|\bcross(?:ing)? street\b",
+                    r"|\bside (?:road|street)s?\b|\bcross(?:ing)? street\b|\bcentral island\b"
+                    r"|\b(?:stop|yield|give way) (?:signs?|lines?)\b|\b(?:on|at) the corner\b",
     "pedestrian_crossing": r"\bcross ?walks?\b|\bzebra\b|\bpedestrian crossings?\b|\bcrossing sign\b",
-    "traffic_signals": r"\btraffic (?:lights?|signals?)\b|\b(?:red|green|amber|yellow) lights?\b|\bstop ?lights?\b",
-    "oneway": r"\bone[- ]way\b",
+    "traffic_signals": r"\btraffic (?:lights?|signals?)\b|\b(?:red|green|amber|yellow) (?:lights?|signal)\b"
+                       r"|\bstop ?lights?\b",
+    "oneway": r"\bone[- ]way\b|\boncoming\b|\bopposite direction\b|\bopposing (?:traffic|lanes?|direction)\b"
+              r"|\b(?:divided|dual) (?:highway|carriageway|road)\b|\bmedian\b",
     "road_type": r"\b(?:highway|motorway|expressway|freeway|residential|boulevard|avenue|main road|side street"
                  r"|narrow street|country road|dual carriageway)\b",
-    "turn": r"\bturn(?:s|ed|ing)? (?:to the )?(?:left|right)\b|\b(?:left|right) turn\b|\bgoes straight\b"
-            r"|\bstraight ahead\b|\bcontinues straight\b",
+    "turn": r"\bturn(?:s|ed|ing)? (?:to the )?(?:left|right)\b|\b(?:left|right)[- ]turn\b|\bgoes straight\b"
+            r"|\bstraight ahead\b|\bcontinues straight\b|\btravels straight\b|\bstraight (?:stretch|road)\b"
+            r"|\bcurv(?:e|es|ing|ed|ature)\b(?:\s+\w+){0,3}\s+(?:to the )?(?:left|right)\b"
+            r"|\bbends? (?:to the )?(?:left|right)\b",
+    "speed_limit": r"\bspeed limits?\b|\b\d+ ?(?:km/h|mph)\b",  # not asked yet; for a speed-limit check
 }
 COMPILED = {attribute: re.compile(pattern, re.IGNORECASE) for attribute, pattern in PATTERNS.items()}
 SENTENCE = re.compile(r"(?<=[.!?])\s+")
