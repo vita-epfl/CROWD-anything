@@ -272,3 +272,35 @@ def test_indirect_leaks(text, attribute):
 
 def test_harmless_phrases_are_not_leaks():
     assert leaks("The car follows a silver SUV in the same lane past parked cars and trees.") == {}
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg required")
+def test_rgwm_prepare_cuts_the_sample_window(tmp_path):
+    import csv
+
+    from evaluation import rgwm
+    from tests.test_tokenization import frame_numbers, make_indexed_video
+
+    natix = tmp_path / "natix"
+    (natix / "Croatia").mkdir(parents=True)
+    make_indexed_video(natix / "Croatia" / "FRONT.mkv", seconds=4, fps=30)  # 120 source frames, 96 on the 24 fps grid
+    export = tmp_path / "export"
+    (export / "videos" / "sample-01").mkdir(parents=True)
+    _make_video(export / "videos" / "sample-01" / "top_i2v.mp4", seconds=1)  # 64x48, like the source
+    sample_id = "Croatia/FRONT.mkv#f000024"
+    with open(export / "generations.csv", "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["sample", "sample_id", "profile", "mode", "file"])
+        writer.writeheader()
+        writer.writerow({"sample": "sample-01", "sample_id": sample_id, "profile": "top", "mode": "i2v",
+                         "file": "videos/sample-01/top_i2v.mp4"})
+    clips_csv = rgwm.prepare(export, natix, tmp_path / "out", num_frames=9)
+    clips = topology.read_clips(clips_csv)
+    assert set(clips[sample_id]) == {"top_i2v", "reference"}
+    from evaluation.video import iter_frames
+
+    reference = list(iter_frames(clips[sample_id]["reference"]))
+    assert len(reference) == 9
+    # the grid frames 24..32 of the source (frame i at i/24 s); h264 may shift the encoded values by a level or two
+    expected = [round(i * 30 / 24) for i in range(24, 33)]
+    assert all(abs(a - b) <= 2 for a, b in zip(frame_numbers(reference), expected))
+    assert rgwm.split_sample_id(sample_id) == ("Croatia/FRONT.mkv", 24)
