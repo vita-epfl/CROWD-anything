@@ -26,12 +26,19 @@ PAR=${PAR:-8}
 mkdir -p "$DEST" "$LOGDIR/logs"
 
 fetch_one() {
-    local id=$1 f="$DEST/$1.mp4" url="" size="" alias
+    local id=$1 f="$DEST/$1.mp4" url="" size="" alias head code
     [ -s "$f" ] && return 0
+    [ -e "$SERVER_DOWN" ] && return 0  # another download found the server down: stop quickly
     for alias in tue4 tue5 tue3; do
-        size=$(curl -sS -I --netrc-file ~/.netrc-crowd --max-time 60 "https://files.mobility-squad.com/v/$alias/files/$id.mp4" 2>/dev/null \
-            | tr -d '\r' | awk 'NR==1{ok=($2=="200")} ok && tolower($1)=="content-length:"{print $2}') || true
-        if [ -n "$size" ]; then url="https://files.mobility-squad.com/v/$alias/files/$id.mp4"; break; fi
+        head=$(curl -sS -I --netrc-file ~/.netrc-crowd --max-time 60 "https://files.mobility-squad.com/v/$alias/files/$id.mp4" 2>/dev/null \
+            | tr -d '\r') || true
+        code=$(awk 'NR==1{print $2}' <<<"$head")
+        if [ "$code" = 200 ]; then
+            size=$(awk 'tolower($1)=="content-length:"{print $2}' <<<"$head")
+            url="https://files.mobility-squad.com/v/$alias/files/$id.mp4"; break
+        elif [ "$code" != 404 ]; then  # 502, timeout, ...: the server is down, not the video missing
+            echo "server_error $id $alias ${code:-none}"; touch "$SERVER_DOWN"; return 0
+        fi
     done
     if [ -z "$url" ]; then echo "missing $id"; return 0; fi
     local rc=0
@@ -41,9 +48,12 @@ fetch_one() {
     else echo "size_mismatch $id $alias $(stat -c %s "$f.part") $size"; rm -f "$f.part"; fi
 }
 export -f fetch_one
+SERVER_DOWN=$(mktemp -u "$LOGDIR/server_down.XXXXXX")
+export SERVER_DOWN
 
 # Chain: queue the next job now (it waits for this one), so a job stopped by the 1-day limit still continues.
 # A job that ends normally cancels it when nothing is left or when it made no progress (only failures left).
+# When the file server is down (any answer but 200/404), the job stops early and the next one starts 1 h later.
 CHAIN=${CHAIN:-0}
 next=""
 if [ "$CHAIN" -gt 1 ]; then
@@ -63,7 +73,13 @@ awk -v s="$secs" '$1=="ok"{n++; b+=$4} END{printf "this run: %d videos, %.1f GB 
 grep -v '^ok' "$run" || true
 done_now=$(grep -c '^ok' "$run" || true)
 left=$(( $(wc -l < "$IDS") - $(find "$DEST" -maxdepth 1 -name '*.mp4' | wc -l) ))
-if [ -n "$next" ] && { [ "$left" -le 0 ] || [ "$done_now" -eq 0 ]; }; then
+if [ -e "$SERVER_DOWN" ]; then
+    rm -f "$SERVER_DOWN"
+    echo "file server down: stopped early"
+    if [ -n "$next" ]; then
+        scontrol update JobId="$next" StartTime=now+1hour && echo "next job $next starts in 1 h"
+    fi
+elif [ -n "$next" ] && { [ "$left" -le 0 ] || [ "$done_now" -eq 0 ]; }; then
     scancel "$next" && echo "cancelled next job $next: $left left, $done_now downloaded in this run"
 fi
 rm -f "$todo" "$run"
