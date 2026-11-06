@@ -64,14 +64,14 @@ def question_for(attribute: str) -> Question:
 
 def parse_letter(text: str, num_options: int) -> Optional[int]:
     """Index of the option the reply chooses, or None: a reply that is the letter ("B", "B.", "(B) major road"), or
-    a longer reply's last stated choice ("the answer is B", "Answer: (B)", "**B**"). A capital letter elsewhere in
-    a sentence ("A car is ...") is not a choice."""
+    a longer reply's last stated choice ("the answer is B", "Answer: (B)", "**B**", or the letter alone at its end:
+    "... a minor road.  C"). A capital letter elsewhere in a sentence ("A car is ...") is not a choice."""
     letters = LETTERS[:num_options]
     text = text.strip()
     match = re.match(rf"\(?([{letters}])(?:[.):]|$)", text)
     if not match:
         stated = re.findall(rf"(?i:answer|option|choice)\W{{0,3}}(?:is\W{{1,3}})?\(?([{letters}])\b"
-                            rf"|\*\*\(?([{letters}])[.)]?\*\*", text)
+                            rf"|\*\*\(?([{letters}])[.)]?\*\*|(?<=[.:\s])\(?([{letters}])[.)]?$", text)
         return LETTERS.index("".join(stated[-1])) if stated else None
     return LETTERS.index(match.group(1))
 

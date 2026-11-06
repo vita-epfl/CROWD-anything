@@ -99,6 +99,8 @@ def test_parse_letter_and_prompt():
     assert parse_letter("A car drives on a road with two lanes. Answer: (C)", 3) == 2
     assert parse_letter("Based on the visual evidence in the frames, particularly", 3) is None
     assert parse_letter("The road looks wide, so **B**.", 3) == 1
+    assert parse_letter("The road has a median and no oncoming traffic.  C", 3) == 2
+    assert parse_letter("There is one lane in the camera car's direction of travel. A", 3) == 0
     prompt = question_for("intersection").prompt(8)
     assert "8 frames" in prompt and "D. roundabout" in prompt and prompt.endswith("letter of one option only.")
 
