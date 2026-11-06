@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPS Annotator</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<!--
+GPS track of a YouTube driving video, for the world-model demo (trajectory + anchors at famous places).
+
+Serve this folder and open the page (YouTube does not play inside file:// pages):
+  python3 -m http.server 8765 --directory demo   ->  http://localhost:8765/gps_annotator.html
+
+Load a video (YouTube id, optional start/end seconds), play it, and click on the map where the camera car is now:
+that pins the car's position at the current video time. Pin at least every turn and every 20-30 s, and twice at a
+stop (when it stops and when it moves again). Between pins the path follows the roads (OSRM car routing; a segment
+whose route is much longer than the straight line is drawn red: add a pin in between or set it to straight), and the
+car moves at constant speed along it. While the video plays, the red dot shows where the track puts the car.
+Export writes the track at 1 Hz (CSV: video_id, t_s = seconds in the YouTube video, lat, lon) and the pins (JSON,
+which Import reads back). Work is also kept in this browser per video id.
+-->
+<style>
+  :root { --bg: #f6f6f4; --panel: #fff; --text: #1d1d1f; --muted: #6b6b70; --line: #dcdcd8; --accent: #2563eb;
+          --warn: #dc2626; --ok: #16a34a; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg: #151517; --panel: #1f1f22; --text: #ececee; --muted: #9a9aa0;
+                                       --line: #343438; --accent: #60a5fa; --warn: #f87171; --ok: #4ade80; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 16px;
+           border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 15px; margin: 0 12px 0 0; }
+  input, button, select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+                          border-radius: 6px; padding: 5px 8px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px 16px;
+         height: calc(100vh - 58px); }
+  .col { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+  #playerBox { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 8px;
+               overflow: hidden; }
+  #playerBox > * { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #map { flex: 1; min-height: 300px; border-radius: 8px; border: 1px solid var(--line); }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  #time { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 90px; }
+  #pins { flex: 1; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+  th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 500; }
+  tr.bad td.seg { color: var(--warn); font-weight: 600; }
+  td button { padding: 1px 6px; }
+  .muted { color: var(--muted); }
+  #status { color: var(--muted); }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; height: auto; } #map { height: 60vh; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>GPS Annotator</h1>
+  <input id="vid" placeholder="YouTube id" size="13">
+  <input id="t0" placeholder="start s" size="6" inputmode="numeric">
+  <input id="t1" placeholder="end s" size="6" inputmode="numeric">
+  <button id="load" class="primary">Load</button>
+  <input id="place" placeholder="Go to place (e.g. Trocadéro, Paris)" size="26">
+  <button id="exportCsv">Export CSV</button>
+  <button id="exportJson">Export pins</button>
+  <label><button id="importBtn">Import pins</button><input id="importFile" type="file" accept=".json" hidden></label>
+  <span id="status"></span>
+</header>
+<main>
+  <section class="col">
+    <div id="playerBox"><div id="player"></div></div>
+    <div class="bar">
+      <span id="time">0:00.0</span>
+      <button data-seek="-10">-10 s</button><button data-seek="-2">-2 s</button>
+      <button id="play">Play / pause</button>
+      <button data-seek="2">+2 s</button><button data-seek="10">+10 s</button>
+      <select id="rate"><option>0.5</option><option selected>1</option><option>2</option></select>
+      <span class="muted">Space play, ←/→ 2 s, shift 10 s. Click map = pin at this time.</span>
+    </div>
+    <div id="pins"><table><thead><tr><th>#</th><th>time</th><th>lat, lon</th><th>to next</th><th></th></tr></thead>
+      <tbody id="pinRows"></tbody></table></div>
+  </section>
+  <section class="col"><div id="map"></div></section>
+</main>
+<script>
+"use strict";
+const OSRM = "https://router.project-osrm.org/route/v1/driving/";
+const state = { video: null, t0: 0, t1: null, pins: [], routes: new Map() };  // pins: {t, lat, lon, straight}
+let player = null, playerReady = false;
+
+const $ = (id) => document.getElementById(id);
+const fmt = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
+const status = (msg) => { $("status").textContent = msg; };
+
+// ---- map
+const map = L.map("map").setView([48.8584, 2.2945], 15);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19, attribution: "&copy; OpenStreetMap contributors" }).addTo(map);
+const pinLayer = L.layerGroup().addTo(map), pathLayer = L.layerGroup().addTo(map);
+const carDot = L.circleMarker([0, 0], { radius: 8, color: "#fff", weight: 2, fillColor: "#dc2626", fillOpacity: 1 });
+
+map.on("click", (e) => {
+  if (!playerReady) { status("Load a video first"); return; }
+  addPin(currentTime(), e.latlng.lat, e.latlng.lng);
+});
+
+// ---- geometry
+function haversine(a, b) {
+  const R = 6371000, r = Math.PI / 180;
+  const dlat = (b[0] - a[0]) * r, dlon = (b[1] - a[1]) * r;
+  const h = Math.sin(dlat / 2) ** 2 + Math.cos(a[0] * r) * Math.cos(b[0] * r) * Math.sin(dlon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function along(line, frac) {  // point at fraction of a polyline's length
+  const seg = [];
+  let total = 0;
+  for (let i = 1; i < line.length; i++) { const d = haversine(line[i - 1], line[i]); seg.push(d); total += d; }
+  if (total === 0) return line[0];
+  let target = frac * total;
+  for (let i = 0; i < seg.length; i++) {
+    if (target <= seg[i] || i === seg.length - 1) {
+      const f = seg[i] ? Math.min(target / seg[i], 1) : 0;
+      return [line[i][0] + f * (line[i + 1][0] - line[i][0]), line[i][1] + f * (line[i + 1][1] - line[i][1])];
+    }
+    target -= seg[i];
+  }
+  return line[line.length - 1];
+}
+const lengthOf = (line) => line.slice(1).reduce((s, p, i) => s + haversine(line[i], p), 0);
+
+// ---- routes between consecutive pins
+const key = (a, b) => `${a.lat.toFixed(6)},${a.lon.toFixed(6)};${b.lat.toFixed(6)},${b.lon.toFixed(6)}`;
+async function route(a, b) {
+  const k = key(a, b);
+  if (state.routes.has(k)) return state.routes.get(k);
+  const straight = [[a.lat, a.lon], [b.lat, b.lon]];
+  let line = straight;
+  try {
+    const url = `${OSRM}${a.lon},${a.lat};${b.lon},${b.lat}?overview=full&geometries=geojson`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.code === "Ok") line = data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+  } catch (err) { status("Routing failed, using straight lines"); }
+  // OSRM starts and ends at the nearest road point: join the clicked points to it
+  line = [[a.lat, a.lon], ...line, [b.lat, b.lon]];
+  state.routes.set(k, line);
+  return line;
+}
+function segmentLine(i) {
+  const a = state.pins[i], b = state.pins[i + 1];
+  if (a.straight) return [[a.lat, a.lon], [b.lat, b.lon]];
+  return state.routes.get(key(a, b)) || [[a.lat, a.lon], [b.lat, b.lon]];
+}
+const isDetour = (i) => {
+  const a = state.pins[i], b = state.pins[i + 1];
+  const direct = haversine([a.lat, a.lon], [b.lat, b.lon]);
+  return !a.straight && direct > 15 && lengthOf(segmentLine(i)) > 1.6 * direct + 30;
+};
+
+function positionAt(t) {
+  const p = state.pins;
+  if (!p.length) return null;
+  if (t <= p[0].t) return [p[0].lat, p[0].lon];
+  for (let i = 0; i < p.length - 1; i++) {
+    if (t <= p[i + 1].t) return along(segmentLine(i), (t - p[i].t) / Math.max(p[i + 1].t - p[i].t, 1e-6));
+  }
+  return [p[p.length - 1].lat, p[p.length - 1].lon];
+}
+
+// ---- pins
+function addPin(t, lat, lon) {
+  const near = state.pins.find((p) => Math.abs(p.t - t) < 0.5);
+  if (near) Object.assign(near, { lat, lon });
+  else state.pins.push({ t: Math.round(t * 10) / 10, lat, lon, straight: false });
+  state.pins.sort((a, b) => a.t - b.t);
+  changed();
+}
+async function changed() {
+  save();
+  await Promise.all(state.pins.slice(1).map((b, i) => state.pins[i].straight ? null : route(state.pins[i], b)));
+  draw();
+}
+function draw() {
+  pinLayer.clearLayers(); pathLayer.clearLayers();
+  state.pins.forEach((p, i) => {
+    const m = L.marker([p.lat, p.lon], { draggable: true, title: fmt(p.t) }).addTo(pinLayer);
+    m.bindTooltip(`${i + 1} · ${fmt(p.t)}`);
+    m.on("dragend", (e) => { const ll = e.target.getLatLng(); p.lat = ll.lat; p.lon = ll.lng; changed(); });
+    m.on("click", () => seek(p.t, true));
+  });
+  for (let i = 0; i < state.pins.length - 1; i++) {
+    L.polyline(segmentLine(i), { color: isDetour(i) ? "#dc2626" : "#2563eb", weight: 5, opacity: 0.8 })
+      .addTo(pathLayer);
+  }
+  const rows = state.pins.map((p, i) => {
+    let seg = "";
+    if (i < state.pins.length - 1) {
+      const d = lengthOf(segmentLine(i)), dt = state.pins[i + 1].t - p.t;
+      seg = `${Math.round(d)} m, ${dt.toFixed(1)} s, ${dt > 0 ? (3.6 * d / dt).toFixed(0) : "–"} km/h`
+          + `${p.straight ? " (straight)" : ""}`;
+    }
+    return `<tr class="${i < state.pins.length - 1 && isDetour(i) ? "bad" : ""}">
+      <td>${i + 1}</td><td><a href="#" data-go="${i}">${fmt(p.t)}</a></td>
+      <td>${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}</td><td class="seg">${seg}</td>
+      <td>${i < state.pins.length - 1 ? `<button data-straight="${i}" title="road route / straight line">⟷</button>` : ""}
+          <button data-del="${i}" title="delete pin">✕</button></td></tr>`;
+  });
+  $("pinRows").innerHTML = rows.join("");
+  status(`${state.pins.length} pins` + (state.pins.length > 1
+    ? `, ${fmt(state.pins[state.pins.length - 1].t - state.pins[0].t)} covered` : ""));
+}
+$("pinRows").addEventListener("click", (e) => {
+  const el = e.target.closest("[data-go],[data-del],[data-straight]");
+  if (!el) return;
+  e.preventDefault();
+  if (el.dataset.go) { const p = state.pins[+el.dataset.go]; seek(p.t, true); map.panTo([p.lat, p.lon]); }
+  if (el.dataset.del) { state.pins.splice(+el.dataset.del, 1); changed(); }
+  if (el.dataset.straight) { const p = state.pins[+el.dataset.straight]; p.straight = !p.straight; changed(); }
+});
+
+// ---- storage, import, export
+const storeKey = () => `gps-annotator:${state.video}`;
+function save() {
+  try { localStorage.setItem(storeKey(), JSON.stringify({ t0: state.t0, t1: state.t1, pins: state.pins })); }
+  catch (err) { /* private mode: export instead */ }
+}
+function restore() {
+  try { const d = JSON.parse(localStorage.getItem(storeKey()) || "null"); if (d) state.pins = d.pins || []; }
+  catch (err) { state.pins = []; }
+}
+function download(name, text, type) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = name; a.click(); URL.revokeObjectURL(a.href);
+}
+$("exportCsv").onclick = () => {
+  const p = state.pins;
+  if (p.length < 2) { status("Need at least 2 pins"); return; }
+  const lines = ["video_id,t_s,lat,lon"];
+  for (let t = Math.ceil(p[0].t); t <= p[p.length - 1].t; t++) {
+    const [lat, lon] = positionAt(t);
+    lines.push(`${state.video},${t},${lat.toFixed(7)},${lon.toFixed(7)}`);
+  }
+  download(`${state.video}_${Math.ceil(p[0].t)}-${Math.floor(p[p.length - 1].t)}_gps.csv`, lines.join("\n") + "\n",
+           "text/csv");
+};
+$("exportJson").onclick = () => download(`${state.video}_pins.json`, JSON.stringify(
+  { video_id: state.video, t0: state.t0, t1: state.t1, pins: state.pins }, null, 1), "application/json");
+$("importBtn").onclick = () => $("importFile").click();
+$("importFile").onchange = async (e) => {
+  const d = JSON.parse(await e.target.files[0].text());
+  $("vid").value = d.video_id; $("t0").value = d.t0 || ""; $("t1").value = d.t1 || "";
+  loadVideo(); state.pins = d.pins; changed();
+  if (d.pins.length) map.fitBounds(d.pins.map((p) => [p.lat, p.lon]), { padding: [40, 40] });
+};
+
+// ---- place search (OSM Nominatim)
+$("place").addEventListener("keydown", async (e) => {
+  if (e.key !== "Enter" || !e.target.value.trim()) return;
+  const res = await fetch("https://nominatim.openstreetmap.org/search?format=json&limit=1&q="
+                          + encodeURIComponent(e.target.value.trim()));
+  const hits = await res.json();
+  if (hits.length) map.setView([+hits[0].lat, +hits[0].lon], 17); else status("Place not found");
+});
+
+// ---- YouTube player
+function currentTime() { return playerReady ? player.getCurrentTime() : 0; }
+function seek(t, pause) {
+  if (!playerReady) return;
+  player.seekTo(Math.max(t, 0), true);
+  if (pause) player.pauseVideo();
+}
+function loadVideo() {
+  const id = $("vid").value.trim().replace(/.*(?:v=|youtu\.be\/)([\w-]{11}).*/, "$1");
+  if (!/^[\w-]{11}$/.test(id)) { status("Not a YouTube id"); return; }
+  state.video = id; state.t0 = +$("t0").value || 0; state.t1 = +$("t1").value || null;
+  state.pins = []; restore();
+  history.replaceState(null, "", `#${id},${state.t0}${state.t1 ? "," + state.t1 : ""}`);
+  const vars = { start: Math.floor(state.t0), rel: 0, modestbranding: 1, playsinline: 1 };
+  if (state.t1) vars.end = Math.ceil(state.t1);
+  if (player) { player.loadVideoById({ videoId: id, startSeconds: state.t0, endSeconds: state.t1 || undefined });
+                player.pauseVideo(); }
+  else player = new YT.Player("player", { videoId: id, playerVars: vars,
+                                          events: { onReady: () => { playerReady = true; } } });
+  changed();
+  if (state.pins.length) map.fitBounds(state.pins.map((p) => [p.lat, p.lon]), { padding: [40, 40] });
+}
+$("load").onclick = loadVideo;
+$("vid").addEventListener("keydown", (e) => { if (e.key === "Enter") loadVideo(); });
+$("play").onclick = () => {
+  if (!playerReady) return;
+  player.getPlayerState() === YT.PlayerState.PLAYING ? player.pauseVideo() : player.playVideo();
+};
+document.querySelectorAll("[data-seek]").forEach((b) => { b.onclick = () => seek(currentTime() + +b.dataset.seek); });
+$("rate").onchange = (e) => playerReady && player.setPlaybackRate(+e.target.value);
+document.addEventListener("keydown", (e) => {
+  if (e.target.matches("input, select") || !playerReady) return;
+  if (e.key === " ") { e.preventDefault(); $("play").click(); }
+  if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+    e.preventDefault(); seek(currentTime() + (e.key === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? 10 : 2));
+  }
+});
+setInterval(() => {
+  const t = currentTime();
+  $("time").textContent = fmt(t);
+  const pos = positionAt(t);
+  if (pos) carDot.setLatLng(pos).addTo(map); else carDot.remove();
+}, 200);
+
+window.onYouTubeIframeAPIReady = () => {
+  const [id, t0, t1] = location.hash.slice(1).split(",");
+  if (id) { $("vid").value = id; $("t0").value = t0 || ""; $("t1").value = t1 || ""; loadVideo(); }
+};
+const tag = document.createElement("script");
+tag.src = "https://www.youtube.com/iframe_api";
+document.head.appendChild(tag);
+</script>
+</body>
+</html>
