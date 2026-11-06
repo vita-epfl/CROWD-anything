@@ -111,10 +111,11 @@ def export_batch(clips: Clips, facts: dict[str, dict[str, str]], out_dir: Path, 
     (out_dir / "prompts.json").write_text(json.dumps({"prompts": prompts}, indent=1))
 
 
-def read_batch_answers(path: Path, facts: dict[str, dict[str, str]], model_name: str) -> list[dict]:
-    """Answer records from a batch runner's output ({"results": [{video_id, prompt_id, status, answer}]})."""
+def read_batch_answers(paths: list[Path], facts: dict[str, dict[str, str]], model_name: str) -> list[dict]:
+    """Answer records from batch runner outputs ({"results": [{video_id, prompt_id, status, answer}]}), e.g. one
+    per GPU shard."""
     records = []
-    for result in json.loads(path.read_text())["results"]:
+    for result in (r for path in paths for r in json.loads(path.read_text())["results"]):
         clip_id, side = result["video_id"].split("::", 1)
         attribute = result["prompt_id"]
         if attribute not in facts.get(clip_id, {}):
@@ -224,7 +225,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     score_cmd = sub.choices["score"]
     score_cmd.add_argument("--vqa-url", help="OpenAI-compatible base URL, e.g. http://host:8000/v1")
     score_cmd.add_argument("--model", help="model name (as served, or of the batch runner)")
-    score_cmd.add_argument("--batch-answers", type=Path, help="output JSON of the batch runner")
+    score_cmd.add_argument("--batch-answers", type=Path, nargs="+", help="output JSON(s) of the batch runner")
     args = parser.parse_args(argv)
 
     if args.command == "facts":
@@ -252,7 +253,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     if args.batch_answers:
-        answers = read_batch_answers(args.batch_answers, facts, args.model or "batch")
+        answers = [a for a in read_batch_answers(args.batch_answers, facts, args.model or "batch")
+                   if a["side"] in clips.get(a["clip_id"], {})]  # answer files may hold other clip sets too
     elif args.vqa_url and args.model:
         answers = ask_all(clips, facts, OpenAICompatibleVqa(args.vqa_url, args.model), args.out / "answers.jsonl",
                           args.frames)

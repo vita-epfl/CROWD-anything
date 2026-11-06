@@ -95,6 +95,10 @@ def test_parse_letter_and_prompt():
     assert parse_letter("B", 3) == 1
     assert parse_letter("The answer is C.", 4) == 2
     assert parse_letter("D", 3) is None and parse_letter("", 2) is None
+    assert parse_letter("(B) major road", 3) == 1 and parse_letter("A.", 3) == 0
+    assert parse_letter("A car drives on a road with two lanes. Answer: (C)", 3) == 2
+    assert parse_letter("Based on the visual evidence in the frames, particularly", 3) is None
+    assert parse_letter("The road looks wide, so **B**.", 3) == 1
     prompt = question_for("intersection").prompt(8)
     assert "8 frames" in prompt and "D. roundabout" in prompt and prompt.endswith("letter of one option only.")
 
@@ -194,7 +198,7 @@ def test_export_and_read_batch_answers(tmp_path):
     ]
     (tmp_path / "answers.json").write_text(json.dumps({"results": results}))
     records = {(r["clip_id"], r["side"], r["attribute"]): r for r in
-               read_batch_answers(tmp_path / "answers.json", apply_leaks(facts, {"s1": {"leaked": {"turn": ["x"]}}}),
+               read_batch_answers([tmp_path / "answers.json"], apply_leaks(facts, {"s1": {"leaked": {"turn": ["x"]}}}),
                                   "qwen-drive")}
     assert records[("s1", "reference", "oneway")]["answer"] == "yes"
     assert records[("s1", "top_i2v", "oneway")]["answer"] == "no"
