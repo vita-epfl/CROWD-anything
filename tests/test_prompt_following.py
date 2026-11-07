@@ -46,5 +46,20 @@ def test_export_and_score(tmp_path):
     assert summary["gen"]["confirmed_static"] == 1.0 and summary["gen"]["confirmed_dynamic"] == 0.0
     assert summary["gen"]["confirmed"] == 0.5 and summary["gen"]["rejected"] == 0.0
     assert summary["gen"]["balanced"] == 0.25 and summary["gen"]["confirmed_on_real"] == 0.5
+    assert summary["reference"]["rejected_on_real"] == 1.0 and summary["gen"]["rejected_on_real"] == 0.0
+    assert summary["gen"]["balanced_on_real"] == 0.25
     assert summary[CONTROL]["confirmed"] == 0.0
     assert summary["reference"]["unanswered"] == 1  # clip b: the run failed
+
+
+def test_on_real_leaves_out_what_the_judge_gets_wrong_on_the_real_video(tmp_path):
+    results = [
+        {"video_id": "a::reference", "prompt_id": "a", "status": "ok", "answer": "1: yes\n2: yes\n3: no"},
+        {"video_id": "a::gen", "prompt_id": "a", "status": "ok", "answer": "1: yes\n2: no\n3: yes"},
+    ]
+    path = tmp_path / "answers.json"
+    path.write_text(json.dumps({"results": results}))
+    summary = {s["side"]: s for s in summarize(read_batch_answers([path], STATEMENTS))}
+    assert summary["gen"]["confirmed_on_real"] == 1.0  # statement 3 is not seen on the real video either
+    assert summary["gen"]["rejected_on_real"] is None  # the judge accepts the false statement 2 on the real video
+    assert summary["gen"]["balanced_on_real"] is None

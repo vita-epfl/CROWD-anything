@@ -22,8 +22,10 @@ Results in --out:
   summary.csv        per side: `confirmed_<kind>` = share of the true statements answered yes; `rejected` = share of
                      the false statements answered no; `balanced` = mean of confirmed (static + dynamic) and rejected;
                      `confirmed_on_real` = confirmed, counting only the statements the judge confirms on the
-                     reference (what it cannot see on real video is not the generator's fault). The reference is the
-                     ceiling, `control` the floor: a usable judge confirms far fewer statements on the control.
+                     reference (what it cannot see on real video is not the generator's fault); `rejected_on_real` =
+                     rejected, counting only the false statements the judge rejects on the reference;
+                     `balanced_on_real` = their mean. The reference is the ceiling, `control` the floor: a usable
+                     judge confirms far fewer statements on the control.
 
   python -m evaluation.prompt_following export --clips clips.csv --statements statements.json --out batch/
   python -m evaluation.prompt_following score --clips clips.csv --statements statements.json \
@@ -122,7 +124,9 @@ def read_batch_answers(paths: list[Path], statements: Statements) -> list[dict]:
 
 def summarize(rows: list[dict]) -> list[dict]:
     """Per side, the metrics described in the module docstring (pooled over the side's statements)."""
-    on_real = {(r["clip_id"], r["index"]) for r in rows if r["side"] == REFERENCE and r["true"] and r["answer"]}
+    # statements the judge gets right on the real video: confirmed true ones and rejected false ones
+    on_real = {(r["clip_id"], r["index"]) for r in rows
+               if r["side"] == REFERENCE and r["answer"] is not None and r["answer"] == r["true"]}
     out = []
     sides = sorted({r["side"] for r in rows}, key=lambda s: (s != REFERENCE, s == CONTROL, s))
     for side in sides:
@@ -138,6 +142,10 @@ def summarize(rows: list[dict]) -> list[dict]:
         summary["balanced"] = (summary["confirmed"] + rejected) / 2 if scored and rejected is not None else None
         summary["confirmed_on_real"] = _rate([r["answer"] for r in true_rows
                                               if r["kind"] in SCORED and (r["clip_id"], r["index"]) in on_real])
+        summary["rejected_on_real"] = _rate([not r["answer"] for r in side_rows if not r["true"] and r["answer"]
+                                             is not None and (r["clip_id"], r["index"]) in on_real])
+        both = (summary["confirmed_on_real"], summary["rejected_on_real"])
+        summary["balanced_on_real"] = sum(both) / 2 if None not in both else None
         summary["unanswered"] = sum(r["answer"] is None for r in side_rows)
         out.append(summary)
     return out
