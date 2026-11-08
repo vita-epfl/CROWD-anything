@@ -44,6 +44,39 @@ reference column to check, per attribute, that real videos score well above `con
 that do not are not usable with that VLM. To be adapted once the topology data format (David) and the eval set
 (Yasi) are known: the input of `facts` (here WGS84 positions) and the choice of VLM ("qwen-drive").
 
+`evaluation.prompt_following` (does a video show what its caption says?): `evaluation.caption_statements` splits
+each caption with a local LLM (Qwen3-32B, thinking off) into up to 12 checkable statements tagged static, dynamic or
+topology, plus 3 near-miss false ones (a changed colour, kind of object, turn direction, or speeding up instead of
+slowing down; never a swapped side, which VLM judges confuse even on real video). A VLM answers yes / no to all
+statements of a clip in one call per video; a control asks them on another clip's real video. `summary.csv` reports,
+per video, the share of true statements confirmed and of false ones rejected, also counting only the statements the
+judge gets right on the real clip (`*_on_real`).
+
+```bash
+python -m evaluation.caption_statements --captions captions.csv --model Qwen/Qwen3-32B --out statements.json
+python -m evaluation.prompt_following export --clips clips.csv --statements statements.json --out batch/
+python -m evaluation.prompt_following score --clips clips.csv --statements statements.json \
+    --batch-answers batch/answers-*.json --out results/
+```
+
+`evaluation.traffic_elements` (are the real traffic signs and lights in the generated video, in the same place?):
+Grounding DINO ("traffic sign. traffic light.") on every 4th frame, on the whole frame and on 2 x 2 overlapping tiles
+(distant signs are a few pixels wide), and a DINOv2 feature per box; detections are linked into tracks per video.
+Since the generated car follows the real trajectory, an element of the real clip should appear at the same image
+position at the same time: a generated track of the same class counts as the element when their box centres are
+within 10% of the image diagonal on average (IoU is near 0 for small boxes even when they are in place). Frames of
+the first second are not scored, as an image-to-video model starts from the real first frame. Reported per video:
+presence, centre distance, IoU, appearance similarity, and extra tracks that match no real element. Elements are
+also split by whether the model's anchor images show them; DINOv2 similarity of a sign crop alone does not yet
+separate the clip's own anchors from another clip's, so that split is experimental.
+
+```bash
+python -m evaluation.traffic_elements detect --clips clips.csv --anchors anchors.json \
+    --detector IDEA-Research/grounding-dino-base --features facebook/dinov2-base --out detections/
+python -m evaluation.traffic_elements score --clips clips.csv --anchors anchors.json --detections detections/ \
+    --out results/ --sheets 8
+```
+
 ## WorldLens (CVPR 2026, github.com/worldbench/WorldLens) and what applies to us
 
 WorldLens has 24 dimensions in 5 aspects. Its toolkit is built for nuScenes (6 cameras, 3D boxes, maps) and an old
