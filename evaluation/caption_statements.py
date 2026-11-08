@@ -6,8 +6,9 @@ Each caption becomes up to 12 true statements (one fact each, tagged static, dyn
 near-misses of true statements with one visible detail changed (a colour, the kind of vehicle or object, the
 direction of a turn), so that a judge that does not look closely accepts them. Left/right placement is not changed:
 VLM judges confuse it even on real video, so such a false statement would test the judge rather than the generator.
-Replies that are not valid JSON of that form are asked again once with sampling; captions still without valid
-statements are left out (and logged).
+The LLM swaps sides anyway (14 of 30 captions in a test), so it is asked for 5 false statements and the first 3 that
+are not a true one with left and right swapped are kept. Replies that are not valid JSON of that form are asked again
+once with sampling; captions still without valid statements are left out (and logged).
 
   python -m evaluation.caption_statements --captions captions.csv --model /path/to/Qwen3-32B --out statements.json
   (CSV with columns sample_id and caption)
@@ -26,7 +27,7 @@ from typing import Optional, Sequence
 logger = logging.getLogger(__name__)
 KINDS = ("static", "dynamic", "topology")  # evaluation.prompt_following.KINDS; not imported: this runs in the
 # LLM's environment, which lacks the evaluation dependencies (requests, ...)
-MAX_TRUE, NUM_FALSE = 12, 3
+MAX_TRUE, NUM_FALSE, FALSE_ASKED = 12, 3, 5  # false statements kept, asked for
 
 INSTRUCTIONS = f"""You split the caption of a 5-second dashcam video into short statements that a viewer can check by
 looking at frames of that video.
@@ -43,7 +44,7 @@ Rules for the true statements (at most {MAX_TRUE}):
   kind "topology": the road layout: number of lanes, intersections, T-junctions, roundabouts, side roads,
   pedestrian crossings, traffic lights, one-way or oncoming traffic, the kind of road (highway, residential street).
 
-Then exactly {NUM_FALSE} false statements: each takes one true statement and changes one visible detail so that
+Then exactly {FALSE_ASKED} false statements: each takes one true statement and changes one visible detail so that
 the caption contradicts it: a colour, the kind of vehicle or object, or the direction of a turn (left turn instead
 of right turn), or speeding up instead of slowing down. Do not change on which side or in which lane something is,
 or from which side something comes. Prefer details of the most visible objects and motions; do not invent things the
@@ -64,7 +65,9 @@ EXAMPLES = [
       ("The camera car follows the white sedan.", "dynamic", True),
       ("A black sedan is ahead in the same lane.", "static", False),
       ("The white sedan turns left into the roundabout.", "dynamic", False),
-      ("The camera car speeds up.", "dynamic", False)]),
+      ("The camera car speeds up.", "dynamic", False),
+      ("A white truck is ahead in the same lane.", "static", False),
+      ("The camera car approaches a crossroads.", "topology", False)]),
     ("The scene is a daytime urban intersection under clear weather conditions with bright illumination. The road "
      "surface is paved asphalt featuring a large white right-turn arrow painted in the ego vehicle's lane, a white "
      "stop line, and a pedestrian crosswalk. A grey SUV is positioned in the adjacent left lane, stopped or moving "
@@ -80,7 +83,9 @@ EXAMPLES = [
       ("A traffic light hangs over the road.", "topology", True),
       ("A white SUV is in the lane to the left.", "static", False),
       ("A brick wall runs along the right side of the road.", "static", False),
-      ("A red building with large windows is on the right.", "static", False)]),
+      ("A red building with large windows is on the right.", "static", False),
+      ("It is night.", "static", False),
+      ("A large yellow arrow is painted on the road in the camera car's lane.", "static", False)]),
 ]
 
 
@@ -94,9 +99,24 @@ def messages(caption: str) -> list[dict]:
     return chat
 
 
+SIDES = {"left": "right", "right": "left"}
+TURNING = re.compile(r"\b(?:turn|turns|turning|curve|curves|curving|bend|bends|pan|pans|panning)\b")
+
+
+def swaps_sides(false: str, true: str) -> bool:
+    """Whether a false statement is a true one with left and right swapped ("on the left side" for "on the right
+    side", "crosses from right to left" for "from left to right"); a turn, curve or pan to the other side is
+    allowed."""
+    words = re.findall(r"[a-z]+", false.lower())
+    if TURNING.search(false.lower()) or not any(w in SIDES for w in words):
+        return False
+    return [SIDES.get(w, w) for w in words] == re.findall(r"[a-z]+", true.lower())
+
+
 def parse_statements(text: str) -> Optional[list[dict]]:
     """The statements of a reply (true and false interleaved, so the false ones are not all at the end), or None if
-    it is not the JSON asked for: at least 2 true static or dynamic statements and exactly NUM_FALSE false ones."""
+    it is not the JSON asked for: at least 2 true static or dynamic statements and NUM_FALSE false ones that are not
+    a true statement with left and right swapped (the first NUM_FALSE of those are kept)."""
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     start, end = text.find("{"), text.rfind("}")
     try:
@@ -113,7 +133,8 @@ def parse_statements(text: str) -> Optional[list[dict]]:
         if statement:
             clean.append({"text": statement, "kind": item["kind"], "true": item["true"]})
     true = [s for s in clean if s["true"]][:MAX_TRUE]
-    false = [s for s in clean if not s["true"]]
+    false = [f for f in clean if not f["true"] and not any(swaps_sides(f["text"], t["text"]) for t in true)]
+    false = false[:NUM_FALSE]
     if sum(s["kind"] != "topology" for s in true) < 2 or len(false) != NUM_FALSE:
         return None
     step = len(true) // (NUM_FALSE + 1) or 1
