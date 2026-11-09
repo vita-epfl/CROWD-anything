@@ -15,10 +15,11 @@ for p in glob.glob('$RUN/batch_*/prompts-*.json'):
     want = sum(len(x['video_ids']) for x in json.load(open(p))['prompts'])
     a = p.replace('prompts-', 'answers-')
     n += want - (len(json.load(open(a))['results']) if os.path.exists(a) else 0)
-print(n)\"); speed=\$([ -s $RUN/results_speed/summary.csv ] && echo 1 || echo 0); echo \"\$left \$speed \$q\"" 2>/dev/null)
+print(n if glob.glob('$RUN/batch_pf/prompts-*.json') else -1)\"); speed=\$([ -s $RUN/results_speed/summary.csv ] && echo 1 || echo 0); echo \"\$left \$speed \$q\"" 2>/dev/null)
   read -r left speed queued <<< "$out"
   echo "$(date +%H:%M) vqa_left=$left speed_done=$speed queued=$queued"
-  [ -z "$left" ] && { sleep 120; continue; }
+  # -1: stage 1 has not exported the questions yet (nor cut the clips)
+  if [ -z "$left" ] || [ "$left" = -1 ]; then sleep 120; continue; fi
   n=$(tr ',' '\n' <<< "$queued" | grep -c long-)
   if [ "$left" -gt 0 ] && [[ "$queued" != *long-vqa* ]] && [ "$n" -lt 2 ]; then
     c "cd $JOBS && sbatch --export=ALL,RUN=$RUN vqa.sbatch"; n=$((n + 1)); queued="$queued,long-vqa"
