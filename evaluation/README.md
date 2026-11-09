@@ -87,6 +87,20 @@ python -m evaluation.traffic_elements score --clips clips.csv --anchors anchors.
     --out results/ --sheets 8
 ```
 
+`evaluation.vehicle_speed` (do the other vehicles drive at speeds that fit the road's OSM speed limit, as in the real
+clip?): ViPE gives metric depth, camera poses and tracked vehicle masks per video; each vehicle's visible surface is
+lifted to 3D in world coordinates and its speed is the Theil-Sen slope of its ground-plane position (tracks of 1.5 s
+or more within 30 m: mostly the traffic ahead and oncoming). ViPE's metric scale varies per video even on real
+clips, so speeds are rescaled by the real ego speed over ViPE's (the generated car follows the real trajectory).
+Reported per video: moving vehicles, median speed, speed / limit, share above the limit, and the difference from the
+real clip of the same scene.
+
+```bash
+vipe infer video.mp4 -o vipe/<id>          # in the ViPE container, per video
+python -m evaluation.vehicle_speed measure --videos videos.csv --vipe vipe/ --out tracks.csv
+python -m evaluation.vehicle_speed score --tracks tracks.csv --scenes scenes.csv --out results/
+```
+
 ## WorldLens (CVPR 2026, github.com/worldbench/WorldLens) and what applies to us
 
 WorldLens has 24 dimensions in 5 aspects. Its toolkit is built for nuScenes (6 cameras, 3D boxes, maps) and an old
