@@ -101,6 +101,12 @@ python -m evaluation.vehicle_speed measure --videos videos.csv --vipe vipe/ --ou
 python -m evaluation.vehicle_speed score --tracks tracks.csv --scenes scenes.csv --out results/
 ```
 
+`evaluation.horizons` (long generations, scored in 5 s windows, e.g. at 0, 10, 25 and 55 s of a one-minute video):
+prepares each window's real 5 s NATIX sample, edited caption row, OSM route record and anchor images from Valentin's
+anchor-covered selection, matched through the window's source segment rather than the caption times (they drift
+after a recording join), and cuts the real and generated window clips. The Clariden jobs that run all evaluations on
+such a run folder are in [`scripts/clariden/longrun`](../scripts/clariden/longrun).
+
 ## WorldLens (CVPR 2026, github.com/worldbench/WorldLens) and what applies to us
 
 WorldLens has 24 dimensions in 5 aspects. Its toolkit is built for nuScenes (6 cameras, 3D boxes, maps) and an old
