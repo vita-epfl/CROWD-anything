@@ -81,12 +81,14 @@ def parse_answers(text: str, count: int) -> list[Optional[bool]]:
 
 
 def with_control(clips: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
-    """The clips with a `control` side: the reference video of the next clip (in clip_id order)."""
+    """The clips with a `control` side: the reference video of the clip half the list away (in clip_id order). Not
+    the next one: neighbouring ids are often windows of the same drive ("<clip>@0", "<clip>@10"), which shows much
+    the same scene (a control at the next window confirmed ~70% of the statements, another drive's ~47%)."""
     ids = sorted(c for c in clips if REFERENCE in clips[c])
     out = {c: dict(sides) for c, sides in clips.items()}
     if len(ids) > 1:
         for i, clip_id in enumerate(ids):
-            out[clip_id][CONTROL] = clips[ids[(i + 1) % len(ids)]][REFERENCE]
+            out[clip_id][CONTROL] = clips[ids[(i + max(1, len(ids) // 2)) % len(ids)]][REFERENCE]
     return out
 
 

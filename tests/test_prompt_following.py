@@ -22,6 +22,8 @@ def test_control_is_another_clips_reference():
     clips = with_control(CLIPS)
     assert clips["a"][CONTROL] == "rb.mp4" and clips["b"][CONTROL] == "ra.mp4"
     assert CONTROL not in CLIPS["a"]
+    windows = {f"{c}@{s}": {"reference": f"{c}{s}.mp4"} for c in "xy" for s in (0, 10)}
+    assert with_control(windows)["x@0"][CONTROL] == "y0.mp4"  # another drive, not x@10
 
 
 def test_export_and_score(tmp_path):
