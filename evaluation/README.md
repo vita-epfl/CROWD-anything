@@ -59,6 +59,16 @@ python -m evaluation.prompt_following score --clips clips.csv --statements state
     --batch-answers batch/answers-*.json --out results/
 ```
 
+`evaluation.caption_rewrite` (captions without topology, to generate from): a local LLM (Qwen3-32B) removes lanes and
+markings, road type, intersections, crossings, traffic lights and signs, speed limits, oncoming traffic and road
+curves, and keeps everything else in the caption's words. Each rewrite is checked with `evaluation.caption_leaks` and
+for the paraphrases the LLM uses instead ("a marked area with white stripes" for a crosswalk, "the road changes
+direction"); what still leaks is sent back by name, twice at most, before the leaking sentences are dropped.
+
+```bash
+python -m evaluation.caption_rewrite --captions captions.csv --model Qwen/Qwen3-32B --out rewritten.csv
+```
+
 `evaluation.traffic_elements` (are the real traffic signs and lights in the generated video, in the same place?):
 Grounding DINO ("traffic sign. traffic light.") on every 4th frame, on the whole frame and on 2 x 2 overlapping tiles
 (distant signs are a few pixels wide), and a DINOv2 feature per box; detections are linked into tracks per video.
