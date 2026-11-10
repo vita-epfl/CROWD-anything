@@ -28,7 +28,7 @@ print(n if glob.glob('$RUN/batch_pf/prompts-*.json') else -1)\"); speed=\$([ -s 
     c "cd $JOBS && sbatch --export=ALL,RUN=$RUN vision.sbatch"
   fi
   if [ "$left" = 0 ] && [ "$speed" = 1 ] && [ -z "$queued" ]; then
-    c "cd $JOBS && srun -A ab036 -p debug -t 00:10:00 -N1 --environment=wm_data_manifest_env python score.py $RUN"
+    c "cd $JOBS && srun -A ab036 -p debug -t 00:10:00 -N1 --environment=wm_data_manifest_env python $JOBS/score.py $RUN"
     exit 0
   fi
   sleep 180
