@@ -11,6 +11,7 @@ with its real 5 s sample, edited caption row, OSM route record and anchor images
 | `vision.sbatch` | traffic signs and lights (Grounding DINO + DINOv2), ViPE on every clip, vehicle speeds |
 | `score.py` | scores per window start: prompt following, topology kappa, vehicle speed against the limit |
 | `watch.sh` | from a laptop: resubmits the Qwen-Drive job, submits the vision job when a debug slot is free, scores at the end |
+| `generated.sbatch` | generated videos arriving in batches (normal partition, 12 h): reuses a finished real-clip run (`REAL`), takes the videos in the generator's manifest (`MANIFEST`) when it starts, runs vision, then only the unanswered questions (`pending.py`), then scores; resubmit as more videos arrive |
 
 Debug takes two jobs per user and runs one at a time; the topology questions dominate the cost (~2.7 GPU-hours per
 155 windows on real video only), so a full run of all windows and models belongs on the normal partition.

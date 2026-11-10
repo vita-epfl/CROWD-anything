@@ -29,7 +29,7 @@ def write(rows, name):
 
 # prompt following
 statements = read_statements(run / "statements.json")
-rows = pf_answers(sorted((run / "batch_pf").glob("answers-*.json")), statements)
+rows = pf_answers(sorted((run / "batch_pf").rglob("answers-*.json")), statements)
 out = []
 for s in sorted({start[r["clip_id"]] for r in rows}, key=float):
     for summary in summarize([r for r in rows if start[r["clip_id"]] == s]):
@@ -39,7 +39,7 @@ write(out, "scores_prompt_following.csv")
 
 # topology
 facts = json.load(open(run / "facts.json"))
-answers = topo_answers(sorted((run / "batch_topo").glob("answers-*.json")), facts, "qwen-drive")
+answers = topo_answers(sorted((run / "batch_topo").rglob("answers-*.json")), facts, "qwen-drive")
 by = collections.defaultdict(list)
 for a in answers:
     side = a.get("side", "reference")

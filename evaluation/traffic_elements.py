@@ -465,9 +465,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.out.mkdir(parents=True, exist_ok=True)
         for n, (clip_id, sides) in enumerate(clips.items(), 1):
             path = detections_path(args.out, clip_id)
-            if path.exists():
+            done = json.loads(path.read_text()) if path.exists() else {}
+            missing = {side: video for side, video in sides.items() if side not in done}
+            if not missing:
                 continue
-            path.write_text(json.dumps(detect_clip(sides, anchors.get(clip_id, []), detector, args.stride)))
+            # sides added since the last run (generated videos arriving in batches) are detected on their own
+            new = detect_clip(missing, [] if done else anchors.get(clip_id, []), detector, args.stride)
+            path.write_text(json.dumps({**done, **new}))
             logger.info("%d/%d %s", n, len(clips), clip_id)
         return 0
 
