@@ -212,3 +212,6 @@ config
 secret
 runs/
 videos/
+# OCR of demo drives: raw text includes number plates
+demo/hints/*_text.csv
+demo/nominatim_cache.json
